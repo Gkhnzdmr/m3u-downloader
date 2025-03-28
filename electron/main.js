@@ -57,8 +57,8 @@ function createWindow() {
   console.log("Debug mode:", isDebugMode);
 
   mainWindow = new BrowserWindow({
-    width: 900,
-    height: 700,
+    width: 1920,
+    height: 1080,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -348,17 +348,22 @@ ipcMain.handle("get-downloaded-files", async () => {
 // İndirme işlemi
 ipcMain.handle(
   "download-stream",
-  async (event, { url, fileName, downloadDir, createFolders, streamInfo }) => {
+  async (
+    event,
+    { url, fileName, downloadDir, createFolders, streamInfo, forceOverwrite }
+  ) => {
     console.log(`İndirme isteği: ${fileName}`);
     console.log(`URL: ${url}`);
     console.log(`İndirme klasörü: ${downloadDir}`);
+    console.log(`Zorla üzerine yazma: ${forceOverwrite ? "Evet" : "Hayır"}`);
 
     return await downloadSingleStream(
       url,
       fileName,
       downloadDir,
       createFolders,
-      streamInfo
+      streamInfo,
+      forceOverwrite
     );
   }
 );
@@ -369,7 +374,8 @@ async function downloadSingleStream(
   fileName,
   downloadDir,
   createFolders = false,
-  streamInfo = null
+  streamInfo = null,
+  forceOverwrite = false
 ) {
   console.log(`İndirme başlatılıyor - ${url}`);
   // Dosya yolu değişkenini fonksiyon seviyesinde tanımla
@@ -407,6 +413,20 @@ async function downloadSingleStream(
     // Dosya yolu
     filePath = path.join(downloadDir, fileName);
     console.log(`Hedef dosya: ${filePath}`);
+
+    // Eğer forceOverwrite aktifse ve dosya zaten varsa, dosyayı sil
+    if (forceOverwrite && fs.existsSync(filePath)) {
+      console.log(
+        `Dosya zaten var ve zorla üzerine yazma aktif. Siliniyor: ${filePath}`
+      );
+      try {
+        fs.unlinkSync(filePath);
+        console.log(`Mevcut dosya silindi: ${filePath}`);
+      } catch (deleteError) {
+        console.error(`Dosya silinirken hata oluştu: ${deleteError.message}`);
+        // Bu hatayı tolere edebiliriz, bu nedenle devam ediyoruz
+      }
+    }
 
     // Aktif indirmeyi listeye ekle
     global.activeDownloads.set(filePath, {

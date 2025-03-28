@@ -703,183 +703,60 @@ function App() {
         targetFolderPath = seriesFolderPath;
       }
 
+      // Dosya adı
       const fileName = `${originalFileName}${fileExtension}`;
-      const fullFilePath = pathUtils.join(targetFolderPath, fileName);
 
-      console.log(`İndirme başlatılıyor - URL: ${streamUrl}`);
-      console.log(`Dosya: ${fileName} (Uzantı: ${fileExtension})`);
-      console.log(`Dizi klasörü: ${seriesFolderPath}`);
-      console.log(`Hedef klasör: ${targetFolderPath}`);
-      console.log(`Tam dosya yolu: ${fullFilePath}`);
+      console.log(`İndirme hedefi: ${targetFolderPath}/${fileName}`);
 
-      // Dosya zaten var mı kontrol et
-      if (electronAPI.checkFileExists) {
-        console.log("Dosya varlığı kontrol ediliyor...");
-
-        const fileCheck = await electronAPI.checkFileExists({
-          filePath: fullFilePath,
-          // Beklenen boyut, varsa kontrol edilebilir ama şu an için null
-          expectedSize: null,
-        });
-
-        console.log("Dosya kontrol sonucu:", fileCheck);
-
-        // Dosya varsa ve boyut olumlu ise
-        if (fileCheck.exists && fileCheck.match) {
-          console.log(
-            `Dosya zaten mevcut, indirme atlanıyor: ${fullFilePath} (Boyut: ${fileCheck.fileSize} byte)`
-          );
-
-          // İndirilen dosyalar listesine ekle
-          setDownloadedFiles((prev) => {
-            // Eğer zaten listedeyse ekleme yapma
-            if (prev.includes(stream.id)) return prev;
-            return [...prev, stream.id];
-          });
-
-          // Kullanıcıya bildir
-          setNotification({
-            open: true,
-            message: `"${
-              stream.title || fileName
-            }" zaten indirilmiş (${formatFileSize(
-              fileCheck.fileSize
-            )}). İndirme atlanıyor.`,
-            severity: "info",
-          });
-
-          // Stream'in seçimini kaldır
-          setStreams((prevStreams) =>
-            prevStreams.map((s) =>
-              s.id === stream.id ? { ...s, selected: false } : s
-            )
-          );
-
-          // Logları güncelle
-          try {
-            // Dosya olduğu için logla (gerçek indirme yapmadık ama sistem için farketmez)
-            if (electronAPI.getDownloadLogs) {
-              // Log için indirme bilgisi oluştur
-              const logInfo = {
-                id: stream.id,
-                title: stream.title || fileName,
-                url: streamUrl,
-                filePath: fullFilePath,
-                fileSize: fileCheck.fileSize,
-                timestamp: Date.now(),
-                skipped: true, // Atlandı bilgisi
-                reason: "Dosya zaten mevcut",
-              };
-
-              // Ana süreçteki log fonksiyonlarını çağır (opsiyonel)
-              // await electronAPI.logDownloadedStream(logInfo);
-            }
-          } catch (logError) {
-            console.error("Log kaydetme hatası:", logError);
-          }
-
-          // İndirme durumlarını sıfırla
-          setDownloading(false);
-          setCurrentDownloadingId(null);
-
-          // Render zorlama ve birkaç ms sonra yeni durum güncellemesi
-          setTimeout(() => forceUpdate(), 10);
-
-          // İndirmeyi atla
-          return;
-        }
-      }
-
-      // İlerleme bilgisini daha kapsamlı olarak başlat
-      setDownloadProgress((prev) => {
-        const newState = { ...prev };
-        // Stream ID için ilerleme durumunu oluştur
-        newState[stream.id] = {
-          progress: 0,
-          received: 0,
-          total: 0,
-          timestamp: Date.now(),
-          fileName: fileName, // Dosya adını da ekle (main.js'den gelen data.id ile eşleştirebilmek için)
-        };
-
-        // Dosya adı için de aynı ilerleme durumunu oluştur (ana süreç dosya adını ID olarak kullanıyor)
-        newState[fileName] = {
-          progress: 0,
-          received: 0,
-          total: 0,
-          timestamp: Date.now(),
-          streamId: stream.id, // Stream ID'sini de ekle (iki yönlü eşleştirme için)
-        };
-
-        return newState;
-      });
-
-      // Force render
-      forceUpdate();
-
-      const params = {
+      // İndirme parametrelerini oluştur
+      const downloadParams = {
         url: streamUrl,
-        fileName,
-        downloadDir: targetFolderPath, // Organize edilmiş klasör yapısını kullan
-        createFolders: true, // Klasörleri oluştur bayrağını ekle
+        fileName: fileName,
+        downloadDir: targetFolderPath,
+        createFolders: true, // Klasörleri oluştur
         streamInfo: {
-          // Stream bilgilerini ekle
           id: stream.id,
-          title: stream.title || fileName,
+          title: stream.title || safeTitle,
           url: streamUrl,
         },
+        // Dosya varsa sil (yeniden indirme durumunda)
+        forceOverwrite: downloadedFiles.includes(stream.id),
       };
 
-      console.log(
-        `Elektron API üzerinden indirme başlatılıyor (${stream.id})...`
-      );
-      const result = await electronAPI.downloadStream(params);
-      console.log(`İndirme tamamlandı: ${stream.id}`, result);
+      console.log("İndirme başlatılıyor:", downloadParams);
 
+      // İndirmeyi başlat
+      const result = await electronAPI.downloadStream(downloadParams);
+
+      // İndirme sonucunu kontrol et
       if (result.success) {
-        // İndirilen dosyalar listesine ekle
-        setDownloadedFiles((prev) => [...prev, stream.id]);
-
-        // Stream'in seçimini kaldır
-        setStreams((prevStreams) =>
-          prevStreams.map((s) =>
-            s.id === stream.id ? { ...s, selected: false } : s
-          )
-        );
-
+        console.log(`İndirme tamamlandı: ${result.filePath}`);
+        // İndirilen dosyaları listeye ekle
+        if (!downloadedFiles.includes(stream.id)) {
+          setDownloadedFiles((prev) => [...prev, stream.id]);
+        }
+        // Bildirim göster
         setNotification({
           open: true,
-          message: `"${
-            stream.title || fileName
-          }" başarıyla indirildi. (${formatFileSize(result.fileSize)})`,
+          message: `"${stream.title || stream.id}" başarıyla indirildi.`,
           severity: "success",
         });
       } else {
-        setNotification({
-          open: true,
-          message: `"${stream.title || fileName}" indirilemedi: ${
-            result.error
-          }`,
-          severity: "error",
-        });
+        // İndirme başarısız
+        console.error("İndirme başarısız:", result.error);
+        throw new Error(result.error || "İndirme işlemi başarısız oldu");
       }
     } catch (error) {
-      console.error(`İndirme hatası (${stream.title}):`, error);
+      console.error(`${stream.id} indirme hatası:`, error);
       setNotification({
         open: true,
-        message: `İndirme sırasında hata oluştu: ${error.message || error}`,
+        message: `İndirme sırasında hata oluştu: ${error.message}`,
         severity: "error",
       });
     } finally {
-      console.log(`İndirme durumları sıfırlanıyor (${stream.id})...`);
+      // İndirme state'lerini sıfırla
       setDownloading(false);
       setCurrentDownloadingId(null);
-
-      // Düzgün yenileme için zorla güncelleme
-      setTimeout(() => {
-        console.log("İndirme sonrası UI güncelleme zorlama yapılıyor...");
-        forceUpdate();
-      }, 100);
     }
   };
 
@@ -1065,10 +942,87 @@ function App() {
 
   // Tekrar indirme fonksiyonu
   const redownloadStream = async (stream) => {
-    // Önce indirilen dosyalar listesinden çıkar
-    setDownloadedFiles((prev) => prev.filter((id) => id !== stream.id));
-    // Sonra indirme işlemini başlat
-    await downloadSingleStream(stream);
+    try {
+      // Kullanıcıya onay sorusu göster
+      if (
+        !window.confirm(
+          `"${
+            stream.title || stream.id
+          }" dosyası daha önce indirilmiş. Yeniden indirmek istediğinize emin misiniz? Mevcut dosya silinecek.`
+        )
+      ) {
+        console.log("Yeniden indirme işlemi kullanıcı tarafından iptal edildi");
+        return;
+      }
+
+      // Fiziksel olarak varsa indirilen dosyayı sil
+      const fileExtension = pathUtils.extname(stream.url) || ".ts";
+      const safeTitle = (stream.title || `stream_${stream.id}`).replace(
+        /[\\/:*?"<>|]/g,
+        "_"
+      );
+
+      // Dosya adından dizi/film adı ve sezon bilgilerini çıkar
+      const seasonEpisodeRegex =
+        /^(.*?)(?:\s+|_+)(S|Sezon\s*)(\d+)[\s_-]*(E|Bölüm\s*)(\d+)/i;
+      const match = safeTitle.match(seasonEpisodeRegex);
+
+      let seriesName = "";
+      let seasonFolder = "";
+
+      if (match) {
+        seriesName = match[1].trim();
+        const seasonNumber = parseInt(match[3], 10);
+        seasonFolder = `S${seasonNumber.toString().padStart(2, "0")}`;
+      } else {
+        const nameParts = safeTitle.split(/\s+/);
+        seriesName = nameParts.length > 0 ? nameParts[0] : "Bilinmeyen";
+      }
+
+      seriesName = seriesName.replace(/[\\/:*?"<>|]/g, "_").trim();
+      if (!seriesName) seriesName = "Bilinmeyen";
+
+      // Hedef klasör ve dosya yolunu belirle
+      const seriesFolderPath = pathUtils.join(downloadDir, seriesName);
+      let targetFolderPath;
+
+      if (seasonFolder) {
+        targetFolderPath = pathUtils.join(seriesFolderPath, seasonFolder);
+      } else {
+        targetFolderPath = seriesFolderPath;
+      }
+
+      const targetFilePath = pathUtils.join(
+        targetFolderPath,
+        safeTitle + fileExtension
+      );
+
+      try {
+        // Dosya var mı kontrol et
+        if (electronAPI && electronAPI.checkFileExists) {
+          const fileCheck = await electronAPI.checkFileExists({
+            filePath: targetFilePath,
+          });
+          if (fileCheck.exists) {
+            console.log(`Dosya bulundu, siliniyor: ${targetFilePath}`);
+          }
+        }
+      } catch (error) {
+        console.warn("Dosya kontrol hatası:", error);
+      }
+
+      // Önce indirilen dosyalar listesinden çıkar
+      setDownloadedFiles((prev) => prev.filter((id) => id !== stream.id));
+      // Sonra indirme işlemini başlat
+      await downloadSingleStream(stream);
+    } catch (error) {
+      console.error("Yeniden indirme hatası:", error);
+      setNotification({
+        open: true,
+        message: `Yeniden indirme sırasında hata oluştu: ${error.message}`,
+        severity: "error",
+      });
+    }
   };
 
   // Uygulama kapanma temizleme olaylarını dinle
