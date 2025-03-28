@@ -229,6 +229,23 @@ contextBridge.exposeInMainWorld("electronAPI", {
       cleanupListeners = cleanupListeners.filter((l) => l !== listener);
     };
   },
+
+  // Video oynatma fonksiyonu
+  playVideo: async (filePathOrUrl, isUrl = false) => {
+    console.log(
+      `electronAPI.playVideo çağrıldı: ${filePathOrUrl}, URL: ${isUrl}`
+    );
+    try {
+      if (!filePathOrUrl) {
+        throw new Error("Geçersiz dosya yolu veya URL");
+      }
+
+      return await ipcRenderer.invoke("play-video", filePathOrUrl, isUrl);
+    } catch (error) {
+      console.error("Video oynatma hatası:", error);
+      throw error;
+    }
+  },
 });
 
 // Node.js API'lerini direkt olarak erişilebilir yap

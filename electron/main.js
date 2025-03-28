@@ -1055,3 +1055,462 @@ ipcMain.handle("log-downloaded-stream", async (event, streamInfo) => {
     return { success: false, error: error.message };
   }
 });
+
+// MKV dosyasını izleme işlemi
+ipcMain.handle("play-video", async (event, filePathOrUrl, isUrl = false) => {
+  try {
+    console.log(`play-video isteği alındı: ${filePathOrUrl} (URL: ${isUrl})`);
+
+    // Dosya veya URL kontrolü
+    if (isUrl) {
+      try {
+        new URL(filePathOrUrl);
+      } catch (error) {
+        console.error("Geçersiz URL formatı:", error);
+        return { success: false, error: "Geçersiz URL formatı" };
+      }
+    } else {
+      // Dosya kontrolü
+      if (!fs.existsSync(filePathOrUrl)) {
+        console.error("Dosya bulunamadı:", filePathOrUrl);
+        return { success: false, error: "Dosya bulunamadı" };
+      }
+
+      // Dosya uzantısı kontrolü
+      const extension = path.extname(filePathOrUrl).toLowerCase();
+      if (extension !== ".mkv" && extension !== ".mp4" && extension !== ".ts") {
+        console.error("Desteklenmeyen dosya formatı:", extension);
+        return {
+          success: false,
+          error: "Sadece MKV, MP4 ve TS dosyaları desteklenmektedir",
+        };
+      }
+    }
+
+    // Harici oynatıcı seçenekleri
+    const playerOptions = ["Sistem Oynatıcısı", "VLC (Varsa)"];
+
+    // MPV seçeneğini ekle (işletim sistemine göre)
+    if (process.platform === "darwin" || process.platform === "linux") {
+      playerOptions.push("MPV Player (Varsa)");
+    } else if (process.platform === "win32") {
+      playerOptions.push("MPV Player (Varsa)");
+    }
+
+    // Dahili oynatıcı ve iptal seçeneklerini ekle
+    playerOptions.push("Dahili Oynatıcı (Sessiz)", "İptal");
+
+    // Kullanıcıya hangi oynatıcı seçeneğini kullanmak istediğini sor
+    const { response } = await dialog.showMessageBox({
+      type: "question",
+      buttons: playerOptions,
+      defaultId: 0,
+      title: "Video Oynatıcı Seç",
+      message: "Videoyu hangi oynatıcı ile açmak istersiniz?",
+      detail: "Ses sorunu yaşıyorsanız MPV veya VLC kullanmanızı öneriyoruz.",
+    });
+
+    // İptal seçildi
+    if (response === playerOptions.length - 1) {
+      return { success: false, message: "Kullanıcı tarafından iptal edildi" };
+    }
+
+    // Sistem varsayılan oynatıcısı
+    if (response === 0) {
+      try {
+        console.log("Sistem varsayılan oynatıcısı kullanılıyor");
+        const { exec } = require("child_process");
+
+        if (process.platform === "darwin") {
+          // macOS
+          exec(`open "${filePathOrUrl}"`, (error, stdout, stderr) => {
+            if (error) {
+              console.error(`Oynatıcı hatası: ${error.message}`);
+            } else {
+              console.log("Sistem oynatıcısı başlatıldı");
+            }
+          });
+        } else if (process.platform === "win32") {
+          // Windows
+          exec(`start "" "${filePathOrUrl}"`, (error, stdout, stderr) => {
+            if (error) {
+              console.error(`Oynatıcı hatası: ${error.message}`);
+            } else {
+              console.log("Sistem oynatıcısı başlatıldı");
+            }
+          });
+        } else if (process.platform === "linux") {
+          // Linux
+          exec(`xdg-open "${filePathOrUrl}"`, (error, stdout, stderr) => {
+            if (error) {
+              console.error(`Oynatıcı hatası: ${error.message}`);
+            } else {
+              console.log("Sistem oynatıcısı başlatıldı");
+            }
+          });
+        }
+
+        return {
+          success: true,
+          message: "Dosya sistem varsayılan oynatıcısında açılıyor",
+        };
+      } catch (error) {
+        console.error("Sistem oynatıcısı başlatılamadı:", error);
+      }
+    }
+
+    // VLC
+    if (response === 1) {
+      try {
+        console.log("VLC oynatıcısı deneniyor");
+        const { exec } = require("child_process");
+        let vlcCommand = null;
+
+        // İşletim sistemine göre VLC yolunu belirle
+        if (process.platform === "darwin") {
+          // Birden fazla olası macOS VLC yolu
+          const macOSPaths = [
+            "/Applications/VLC.app/Contents/MacOS/VLC",
+            "/Applications/VLC.app/Contents/MacOS/VLC.sh",
+            "/Applications/VLC media player.app/Contents/MacOS/VLC",
+          ];
+
+          for (const vlcPath of macOSPaths) {
+            if (fs.existsSync(vlcPath)) {
+              vlcCommand = `"${vlcPath}" "${filePathOrUrl}"`;
+              break;
+            }
+          }
+
+          // HomeBrew veya diğer yükleme konumları
+          if (!vlcCommand) {
+            try {
+              const whichOutput = require("child_process")
+                .execSync("which vlc")
+                .toString()
+                .trim();
+              if (whichOutput) {
+                vlcCommand = `"${whichOutput}" "${filePathOrUrl}"`;
+              }
+            } catch (err) {
+              console.log("VLC komut satırında bulunamadı");
+            }
+          }
+        } else if (process.platform === "win32") {
+          // Windows VLC yolları
+          const winPaths = [
+            "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe",
+            "C:\\Program Files (x86)\\VideoLAN\\VLC\\vlc.exe",
+          ];
+
+          for (const vlcPath of winPaths) {
+            if (fs.existsSync(vlcPath)) {
+              vlcCommand = `"${vlcPath}" "${filePathOrUrl}"`;
+              break;
+            }
+          }
+        } else if (process.platform === "linux") {
+          vlcCommand = `vlc "${filePathOrUrl}"`;
+        }
+
+        if (vlcCommand) {
+          exec(vlcCommand, (error, stdout, stderr) => {
+            if (error) {
+              console.error(`VLC hatası: ${error.message}`);
+            } else {
+              console.log("VLC başlatıldı");
+            }
+          });
+
+          return {
+            success: true,
+            message: "Dosya VLC ile açılıyor",
+          };
+        } else {
+          // VLC bulunamadı, kullanıcıya kurulum talimatları göster
+          dialog.showMessageBox({
+            type: "info",
+            title: "VLC Bulunamadı",
+            message: "VLC Player kurulu değil veya bulunamadı",
+            detail:
+              "VLC Player'ı https://www.videolan.org/vlc/ adresinden indirebilirsiniz.",
+            buttons: ["Tamam"],
+          });
+
+          return {
+            success: false,
+            error: "VLC bulunamadı. Lütfen VLC'nin yüklü olduğundan emin olun.",
+          };
+        }
+      } catch (error) {
+        console.error("VLC başlatılamadı:", error);
+        return {
+          success: false,
+          error: "VLC başlatılamadı: " + error.message,
+        };
+      }
+    }
+
+    // MPV Player
+    if (response === 2) {
+      try {
+        console.log("MPV oynatıcısı deneniyor");
+        const { exec } = require("child_process");
+        let mpvCommand = null;
+
+        // İşletim sistemine göre MPV yolunu belirle
+        if (process.platform === "darwin") {
+          // macOS için olası MPV yolları
+          const macMPVPaths = [
+            "/usr/local/bin/mpv",
+            "/opt/homebrew/bin/mpv",
+            "/Applications/mpv.app/Contents/MacOS/mpv",
+            "/usr/bin/mpv",
+          ];
+
+          for (const mpvPath of macMPVPaths) {
+            if (fs.existsSync(mpvPath)) {
+              mpvCommand = `"${mpvPath}" "${filePathOrUrl}" --no-terminal`;
+              break;
+            }
+          }
+
+          // Komut satırında ara
+          if (!mpvCommand) {
+            try {
+              const whichOutput = require("child_process")
+                .execSync("which mpv")
+                .toString()
+                .trim();
+              if (whichOutput) {
+                mpvCommand = `"${whichOutput}" "${filePathOrUrl}" --no-terminal`;
+              }
+            } catch (err) {
+              console.log("MPV komut satırında bulunamadı");
+            }
+          }
+        } else if (process.platform === "win32") {
+          // Windows için olası MPV yolları
+          const winMPVPaths = [
+            "C:\\Program Files\\mpv\\mpv.exe",
+            "C:\\Program Files (x86)\\mpv\\mpv.exe",
+            process.env.APPDATA + "\\mpv\\mpv.exe",
+            process.env.LOCALAPPDATA + "\\mpv\\mpv.exe",
+          ];
+
+          for (const mpvPath of winMPVPaths) {
+            if (fs.existsSync(mpvPath)) {
+              mpvCommand = `"${mpvPath}" "${filePathOrUrl}"`;
+              break;
+            }
+          }
+        } else if (process.platform === "linux") {
+          // Linux için
+          mpvCommand = `mpv "${filePathOrUrl}"`;
+        }
+
+        if (mpvCommand) {
+          exec(mpvCommand, (error, stdout, stderr) => {
+            if (error) {
+              console.error(`MPV hatası: ${error.message}`);
+            } else {
+              console.log("MPV başlatıldı");
+            }
+          });
+
+          return {
+            success: true,
+            message: "Dosya MPV ile açılıyor",
+          };
+        } else {
+          // MPV bulunamadı, kullanıcıya kurulum talimatları göster
+          const mpvInstructions =
+            process.platform === "darwin"
+              ? "MPV Player'ı macOS'ta kurmak için: Homebrew ile 'brew install mpv' komutunu kullanabilirsiniz."
+              : process.platform === "win32"
+              ? "MPV Player'ı Windows'ta kurmak için: https://mpv.io/installation/ adresinden indirip kurun."
+              : "MPV Player'ı Linux'ta kurmak için: Dağıtımınızın paket yöneticisiyle mpv paketini yükleyin.";
+
+          dialog.showMessageBox({
+            type: "info",
+            title: "MPV Bulunamadı",
+            message: "MPV Player kurulu değil veya bulunamadı",
+            detail: mpvInstructions,
+            buttons: ["Tamam"],
+          });
+
+          return {
+            success: false,
+            error: "MPV bulunamadı. Lütfen MPV'nin yüklü olduğundan emin olun.",
+          };
+        }
+      } catch (error) {
+        console.error("MPV başlatılamadı:", error);
+        return {
+          success: false,
+          error: "MPV başlatılamadı: " + error.message,
+        };
+      }
+    }
+
+    // Dahili oynatıcı - ama kullanıcıya bunu sessiz olacağı konusunda uyardık
+    console.log("Dahili oynatıcı kullanılıyor (sessiz)");
+    const playerWindow = new BrowserWindow({
+      width: 1280,
+      height: 720,
+      title: isUrl
+        ? "Video Player - Stream"
+        : `Video Player - ${path.basename(filePathOrUrl)}`,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        preload: path.join(__dirname, "preload.js"),
+        webSecurity: false,
+        enableWebAudioRenderer: true,
+      },
+      backgroundColor: "#000000",
+      show: false,
+      autoHideMenuBar: true,
+    });
+
+    playerWindow.webContents.setAudioMuted(false);
+
+    // Basit HTML5 video oynatıcısı
+    const htmlContent = `
+      <!DOCTYPE html>
+      <html lang="tr">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Video Player</title>
+        <style>
+          body, html { 
+            margin: 0; padding: 0; width: 100%; height: 100%; 
+            background-color: #000; overflow: hidden; 
+            display: flex; flex-direction: column;
+          }
+          .player-container { flex: 1; position: relative; }
+          video { width: 100%; height: 100%; }
+          .controls {
+            position: fixed; bottom: 0; left: 0; right: 0;
+            padding: 15px; background: rgba(0,0,0,0.7);
+            display: flex; justify-content: center; gap: 10px;
+          }
+          button {
+            background: #444; color: white; border: none;
+            padding: 8px 15px; border-radius: 4px; cursor: pointer;
+          }
+          button:hover { background: #666; }
+          .status { color: white; margin-left: 15px; }
+          .info-banner {
+            position: fixed; top: 0; left: 0; right: 0;
+            padding: 10px; background: rgba(255,0,0,0.8);
+            color: white; text-align: center; font-weight: bold;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="info-banner">
+          Not: Dahili oynatıcıda ses sorunu var. Lütfen MPV veya VLC oynatıcısını kurun.
+        </div>
+        
+        <div class="player-container">
+          <video id="video" controls autoplay>
+            <source src="${
+              isUrl
+                ? filePathOrUrl
+                : `file://${filePathOrUrl.replace(/\\/g, "/")}`
+            }" type="video/mp4">
+          </video>
+        </div>
+        
+        <div class="controls">
+          <button onclick="document.getElementById('video').play()">Oynat</button>
+          <button onclick="document.getElementById('video').pause()">Duraklat</button>
+          <button onclick="document.getElementById('video').volume=1.0;document.getElementById('video').muted=false;">Sesi Aç</button>
+          <button onclick="document.getElementById('video').currentTime+=10">+10s</button>
+          <button onclick="document.getElementById('video').currentTime-=10">-10s</button>
+          <button onclick="window.close()">Kapat</button>
+        </div>
+        
+        <script>
+          const video = document.getElementById('video');
+          video.muted = false;
+          video.volume = 1.0;
+          
+          // Tam ekran kontrolü
+          document.addEventListener('keydown', (e) => {
+            if (e.key === 'f' || e.key === 'F') {
+              if (document.fullscreenElement) {
+                document.exitFullscreen();
+              } else {
+                video.requestFullscreen();
+              }
+            }
+          });
+        </script>
+      </body>
+      </html>
+    `;
+
+    // Geçici HTML dosyasını oluştur
+    const tempHtmlPath = path.join(app.getPath("temp"), "video-player.html");
+    fs.writeFileSync(tempHtmlPath, htmlContent);
+
+    // HTML dosyasını yükle
+    playerWindow.loadFile(tempHtmlPath);
+
+    // Görünür hale getir
+    playerWindow.once("ready-to-show", () => {
+      playerWindow.show();
+
+      // Ekran boyutunu ayarla
+      const { screen } = require("electron");
+      const primaryDisplay = screen.getPrimaryDisplay();
+      const { width, height } = primaryDisplay.workAreaSize;
+
+      playerWindow.setSize(
+        Math.min(1280, width * 0.9),
+        Math.min(720, height * 0.9)
+      );
+      playerWindow.center();
+
+      // Kullanıcıya MPV kurulum bilgisi göster
+      dialog.showMessageBox(playerWindow, {
+        type: "warning",
+        title: "Ses Sorunu Çözümü",
+        message: "Dahili oynatıcıda ses sorunu devam ediyor",
+        detail:
+          "Videoları sesli izlemek için MPV Player yüklemenizi öneririz:\n\n" +
+          (process.platform === "darwin"
+            ? "macOS: Terminal'i açıp şu komutu yazın: brew install mpv\n(Homebrew kurulu değilse önce https://brew.sh adresinden kurun)"
+            : process.platform === "win32"
+            ? "Windows: https://mpv.io/installation/ adresinden MPV Player'ı indirip kurun."
+            : "Linux: Dağıtımınızın paket yöneticisiyle mpv paketini yükleyin."),
+        buttons: ["Anladım"],
+      });
+    });
+
+    // F12 ile DevTools açılabilsin
+    playerWindow.webContents.on("before-input-event", (event, input) => {
+      if (input.key === "F12") {
+        playerWindow.webContents.openDevTools();
+        event.preventDefault();
+      }
+    });
+
+    // Pencere kapandığında geçici dosyayı temizle
+    playerWindow.on("closed", () => {
+      try {
+        fs.unlinkSync(tempHtmlPath);
+      } catch (err) {
+        console.error("Geçici dosya silme hatası:", err);
+      }
+    });
+
+    return { success: true, message: "Video oynatıcı açıldı (sessiz mod)" };
+  } catch (error) {
+    console.error("Video izleme hatası:", error);
+    return { success: false, error: error.message };
+  }
+});

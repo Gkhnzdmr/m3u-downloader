@@ -2,6 +2,7 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import DownloadIcon from "@mui/icons-material/Download";
 import FileOpenIcon from "@mui/icons-material/FileOpen";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
+import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import SearchIcon from "@mui/icons-material/Search";
 import {
   Alert,
@@ -1044,6 +1045,127 @@ function App() {
     }
   };
 
+  // Video oynatma fonksiyonu
+  const playVideo = async (stream, fromUrl = false) => {
+    try {
+      if (!electronAPI || !electronAPI.playVideo) {
+        throw new Error("Video oynatma API bulunamadı");
+      }
+
+      if (fromUrl) {
+        // Doğrudan URL'den oynat
+        try {
+          // URL kontrolü
+          new URL(stream.url);
+
+          // Videoyu URL'den oynat
+          const result = await electronAPI.playVideo(stream.url, true);
+
+          if (!result.success) {
+            throw new Error(
+              result.error || "Video oynatılırken bir hata oluştu"
+            );
+          }
+
+          setNotification({
+            open: true,
+            message: "Video oynatıcı açıldı (stream)",
+            severity: "success",
+          });
+
+          return;
+        } catch (urlError) {
+          console.error("URL doğrulama hatası:", urlError);
+          throw new Error(`URL geçersiz: ${urlError.message}`);
+        }
+      }
+
+      // Dosya uzantısını kontrol et
+      const fileExtension = pathUtils.extname(stream.url).toLowerCase();
+      if (fileExtension !== ".mkv" && fileExtension !== ".mp4") {
+        setNotification({
+          open: true,
+          message: "Sadece MKV ve MP4 dosyaları oynatılabilir",
+          severity: "warning",
+        });
+        return;
+      }
+
+      // İndirilen dosyanın yolunu belirle
+      const safeTitle = (stream.title || `stream_${stream.id}`).replace(
+        /[\\/:*?"<>|]/g,
+        "_"
+      );
+
+      // Dosya adından dizi/film adı ve sezon bilgilerini çıkar
+      const seasonEpisodeRegex =
+        /^(.*?)(?:\s+|_+)(S|Sezon\s*)(\d+)[\s_-]*(E|Bölüm\s*)(\d+)/i;
+      const match = safeTitle.match(seasonEpisodeRegex);
+
+      let seriesName = "";
+      let seasonFolder = "";
+
+      if (match) {
+        seriesName = match[1].trim();
+        const seasonNumber = parseInt(match[3], 10);
+        seasonFolder = `S${seasonNumber.toString().padStart(2, "0")}`;
+      } else {
+        const nameParts = safeTitle.split(/\s+/);
+        seriesName = nameParts.length > 0 ? nameParts[0] : "Bilinmeyen";
+      }
+
+      seriesName = seriesName.replace(/[\\/:*?"<>|]/g, "_").trim();
+      if (!seriesName) seriesName = "Bilinmeyen";
+
+      // Hedef klasör ve dosya yolunu belirle
+      const seriesFolderPath = pathUtils.join(downloadDir, seriesName);
+      let targetFolderPath;
+
+      if (seasonFolder) {
+        targetFolderPath = pathUtils.join(seriesFolderPath, seasonFolder);
+      } else {
+        targetFolderPath = seriesFolderPath;
+      }
+
+      // Dosya adını belirle
+      const fileNameWithExt =
+        safeTitle + (pathUtils.extname(stream.url) || ".ts");
+      const filePath = pathUtils.join(targetFolderPath, fileNameWithExt);
+
+      // Dosya varlığını kontrol et
+      const fileExists = await electronAPI.checkFileExists({ filePath });
+
+      if (!fileExists.exists) {
+        setNotification({
+          open: true,
+          message: "Dosya bulunamadı. Önce indirmeniz gerekiyor.",
+          severity: "warning",
+        });
+        return;
+      }
+
+      // Video oynatıcıyı aç
+      const result = await electronAPI.playVideo(filePath, false);
+
+      if (!result.success) {
+        throw new Error(result.error || "Video oynatılırken bir hata oluştu");
+      }
+
+      setNotification({
+        open: true,
+        message: "Video oynatıcı açıldı",
+        severity: "success",
+      });
+    } catch (error) {
+      console.error("Video oynatma hatası:", error);
+      setNotification({
+        open: true,
+        message: `Video oynatılırken hata oluştu: ${error.message}`,
+        severity: "error",
+      });
+    }
+  };
+
   // Uygulama kapanma temizleme olaylarını dinle
   useEffect(() => {
     if (electronAPI && electronAPI.onDownloadsCleanup) {
@@ -1446,34 +1568,62 @@ function App() {
                                     <DownloadIcon fontSize="small" />
                                   </IconButton>
                                 </Tooltip>
+                                <Tooltip title="İzle">
+                                  <IconButton
+                                    color="secondary"
+                                    onClick={() => playVideo(stream)}
+                                    size="small"
+                                    sx={{ ml: 1 }}
+                                  >
+                                    <PlayArrowIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
                               </Box>
                             ) : (
-                              <Tooltip
-                                title={
-                                  isDownloading
-                                    ? "İndiriliyor..."
-                                    : "Bu stream'i indir"
-                                }
+                              <Box
+                                sx={{ display: "flex", alignItems: "center" }}
                               >
-                                <span>
+                                <Tooltip
+                                  title={
+                                    isDownloading
+                                      ? "İndiriliyor..."
+                                      : "Bu stream'i indir"
+                                  }
+                                >
+                                  <span>
+                                    <IconButton
+                                      color="primary"
+                                      onClick={() =>
+                                        downloadSingleStream(stream)
+                                      }
+                                      disabled={downloading || batchDownloading}
+                                      size="small"
+                                    >
+                                      {isDownloading ? (
+                                        <CircularProgress
+                                          size={24}
+                                          variant="determinate"
+                                          value={displayProgress}
+                                        />
+                                      ) : (
+                                        <DownloadIcon />
+                                      )}
+                                    </IconButton>
+                                  </span>
+                                </Tooltip>
+
+                                <Tooltip title="Doğrudan İzle">
                                   <IconButton
-                                    color="primary"
-                                    onClick={() => downloadSingleStream(stream)}
-                                    disabled={downloading || batchDownloading}
+                                    color="secondary"
+                                    onClick={() => playVideo(stream, true)}
+                                    disabled={isDownloading}
                                     size="small"
+                                    sx={{ ml: 1 }}
                                   >
-                                    {isDownloading ? (
-                                      <CircularProgress
-                                        size={24}
-                                        variant="determinate"
-                                        value={displayProgress}
-                                      />
-                                    ) : (
-                                      <DownloadIcon />
-                                    )}
+                                    <PlayArrowIcon fontSize="small" />
                                   </IconButton>
-                                </span>
-                              </Tooltip>
+                                </Tooltip>
+                              </Box>
                             )}
 
                             {/* İndirme ilerleme çubuğu */}
