@@ -7,6 +7,7 @@ import {
   Alert,
   Box,
   Button,
+  Checkbox,
   CircularProgress,
   Container,
   IconButton,
@@ -63,9 +64,19 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [currentDownloadingId, setCurrentDownloadingId] = useState(null);
+  // İndirme kuyruğu
+  const [downloadQueue, setDownloadQueue] = useState([]);
+  // Toplu indirme işlemi sürüyor mu?
+  const [batchDownloading, setBatchDownloading] = useState(false);
 
   // İndirme ilerleme durumu için state
   const [downloadProgress, setDownloadProgress] = useState({});
+
+  // Zamanlayıcı için değer - her değiştiğinde otomatik render tetikler
+  const [timerTick, setTimerTick] = useState(0);
+
+  // İndirme başlangıç zamanları
+  const [downloadStartTimes, setDownloadStartTimes] = useState({});
 
   // Debug info için ref
   const debugInfoRef = useRef({
@@ -201,13 +212,25 @@ function App() {
 
       // M3U dosyasını ayrıştır
       const parsedStreams = M3uParser.parse(fileContent);
-      setStreams(parsedStreams);
+      // Her stream için selected özelliğini ekle
+      const streamsWithSelection = parsedStreams.map((stream) => ({
+        ...stream,
+        selected: false,
+      }));
+
+      // Streams durumunu güncelle
+      setStreams(streamsWithSelection);
 
       setNotification({
         open: true,
         message: `${parsedStreams.length} adet stream yüklendi.`,
         severity: "success",
       });
+
+      // Eğer indirme klasörü seçildiyse, var olan dosyaları kontrol et
+      if (downloadDir) {
+        setTimeout(() => checkExistingFiles(downloadDir), 0);
+      }
     } catch (error) {
       console.error("M3U dosyası yüklenemedi:", error);
       setNotification({
@@ -229,6 +252,11 @@ function App() {
       const folderPath = await electronAPI.selectDownloadFolder();
       if (folderPath) {
         setDownloadDir(folderPath);
+
+        // Eğer stream'ler yüklenmişse, klasör değişikliğinde de kontrol et
+        if (streams.length > 0) {
+          setTimeout(() => checkExistingFiles(folderPath), 0);
+        }
       }
     } catch (error) {
       console.error("Klasör seçilemedi:", error);
@@ -237,6 +265,147 @@ function App() {
         message: "Klasör seçilemedi: " + error.message,
         severity: "error",
       });
+    }
+  };
+
+  // İndirme klasöründe var olan dosyaları kontrol et
+  const checkExistingFiles = async (targetDir) => {
+    if (
+      !targetDir ||
+      !electronAPI ||
+      !electronAPI.checkFileExists ||
+      streams.length === 0
+    ) {
+      return;
+    }
+
+    console.log("İndirme klasöründe var olan dosyaları kontrol ediyorum...");
+    setLoading(true);
+
+    try {
+      // Var olan indirilen dosyalar listesini koru
+      const existingDownloadedFiles = [...downloadedFiles];
+      let newDownloadedFiles = [...existingDownloadedFiles];
+      let autoMarkedFiles = 0;
+
+      // Her stream için dosya kontrolü yap
+      const checkPromises = streams.map(async (stream) => {
+        try {
+          // URL kontrolü
+          if (!stream.url) return;
+
+          // Dosya adını ve klasörü belirle
+          const safeTitle = (stream.title || `stream_${stream.id}`).replace(
+            /[\\/:*?"<>|]/g,
+            "_"
+          );
+
+          // Uzantıyı belirle
+          let fileExtension = ".ts"; // Varsayılan
+          try {
+            const urlObj = new URL(stream.url);
+            const pathname = urlObj.pathname;
+            if (pathname && pathname.includes(".")) {
+              const lastPartOfPath = pathname.split("/").pop();
+              if (lastPartOfPath && lastPartOfPath.includes(".")) {
+                const ext = "." + lastPartOfPath.split(".").pop();
+                if (/^\.\w{1,5}$/.test(ext)) {
+                  fileExtension = ext;
+                }
+              }
+            }
+          } catch (e) {
+            // URL'den uzantı çıkarılamadı, varsayılanı kullan
+          }
+
+          // Dizi/Film adını ve klasörü belirle
+          let seriesName = "";
+          let seasonFolder = "";
+          let originalFileName = safeTitle;
+
+          const seasonEpisodeRegex =
+            /^(.*?)(?:\s+|_+)(S|Sezon\s*)(\d+)[\s_-]*(E|Bölüm\s*)(\d+)/i;
+          const match = safeTitle.match(seasonEpisodeRegex);
+
+          if (match) {
+            seriesName = match[1].trim();
+            const seasonNumber = parseInt(match[3], 10);
+            seasonFolder = `S${seasonNumber.toString().padStart(2, "0")}`;
+          } else {
+            const nameParts = safeTitle.split(/\s+/);
+            seriesName = nameParts.length > 0 ? nameParts[0] : "Bilinmeyen";
+          }
+
+          seriesName = seriesName.replace(/[\\/:*?"<>|]/g, "_").trim();
+          if (!seriesName) seriesName = "Bilinmeyen";
+
+          // Klasör yolları oluştur
+          const seriesFolderPath = pathUtils.join(targetDir, seriesName);
+          let targetFolderPath;
+          if (seasonFolder) {
+            targetFolderPath = pathUtils.join(seriesFolderPath, seasonFolder);
+          } else {
+            targetFolderPath = seriesFolderPath;
+          }
+
+          const fileName = `${originalFileName}${fileExtension}`;
+          const fullFilePath = pathUtils.join(targetFolderPath, fileName);
+
+          // Dosya kontrolü yap
+          const fileCheck = await electronAPI.checkFileExists({
+            filePath: fullFilePath,
+            expectedSize: null, // Boyut kontrolünü atla
+          });
+
+          // Eğer dosya varsa ve boyut uyumluysa
+          if (fileCheck.exists && fileCheck.match) {
+            // Henüz indirildi olarak işaretlenmediyse ekle
+            if (!existingDownloadedFiles.includes(stream.id)) {
+              newDownloadedFiles.push(stream.id);
+              autoMarkedFiles++;
+
+              // Log'a kaydedebiliriz (opsiyonel)
+              if (electronAPI.logDownloadedStream) {
+                await electronAPI.logDownloadedStream({
+                  id: stream.id,
+                  title: stream.title || fileName,
+                  url: stream.url,
+                  filePath: fullFilePath,
+                  fileSize: fileCheck.fileSize,
+                  downloadedAt: new Date().toISOString(),
+                  autoDetected: true,
+                });
+              }
+            }
+          }
+        } catch (error) {
+          console.error(`Stream kontrol hatası (${stream.id}):`, error);
+        }
+      });
+
+      // Tüm kontroller tamamlandığında
+      await Promise.all(checkPromises);
+
+      // Yeni dosya listesini güncelle
+      if (newDownloadedFiles.length > existingDownloadedFiles.length) {
+        setDownloadedFiles(newDownloadedFiles);
+        console.log(
+          `${autoMarkedFiles} adet dosya otomatik olarak indirildi olarak işaretlendi.`
+        );
+
+        // Kullanıcıya bildirelim
+        if (autoMarkedFiles > 0) {
+          setNotification({
+            open: true,
+            message: `${autoMarkedFiles} adet dosya zaten indirme klasöründe mevcut olduğu için otomatik olarak işaretlendi.`,
+            severity: "info",
+          });
+        }
+      }
+    } catch (error) {
+      console.error("Dosya kontrolü sırasında hata:", error);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -265,31 +434,46 @@ function App() {
           const now = Date.now();
           debugInfoRef.current.receivedUpdates++;
           debugInfoRef.current.lastProgressTime = now;
-
-          console.log(`
------ REACT: İLERLEME BİLGİSİ ALINDI -----
-ID: ${data.id}
-Progress: %${data.progress || 0}
-Received: ${data.received || 0} bayt
-Total: ${data.total || 0} bayt
-Toplam alınan güncelleme: ${debugInfoRef.current.receivedUpdates}
-----------------------------------------
-`);
-
           // State güncelleme - doğrudan ve senkron olarak
+          console.log(`
+            ----- REACT: İLERLEME BİLGİSİ ALINDI -----
+            ID: ${data.id}
+            Progress: %${Math.round((data.progress || 0) * 100)}
+            Received: ${data.received || 0} bayt
+            Total: ${data.total || 0} bayt
+            Toplam alınan güncelleme: ${debugInfoRef.current.receivedUpdates}
+            ----------------------------------------
+            `);
+
+          // Stream ID ve dosya adı arasındaki eşleştirme problemi çözümü
+          const streamId =
+            streams.find((s) => s.id === currentDownloadingId)?.id || data.id;
+
+          // setDownloadProgress ve ilgili state güncellemesi
           setDownloadProgress((prev) => {
-            // Yeni state oluştur
             const newState = { ...prev };
-            // Mevcut dosya için ilerleme güncelle
-            newState[data.id] = {
+            // Mevcut stream için ilerleme güncelle (hem ID hem de dosya adı ile eşleştirme)
+            newState[streamId] = {
               progress: data.progress || 0,
               received: data.received || 0,
               total: data.total || 0,
               timestamp: now,
             };
 
+            // Eğer data.id bir dosya adı ise ve currentDownloadingId farklıysa
+            if (data.id !== streamId) {
+              newState[data.id] = {
+                progress: data.progress || 0,
+                received: data.received || 0,
+                total: data.total || 0,
+                timestamp: now,
+              };
+            }
+
             // Debug için son ilerlemeyi kaydet
-            debugInfoRef.current.lastProgress = newState[data.id];
+            debugInfoRef.current.lastProgress = newState[streamId];
+
+            console.log("State güncellendi:", newState);
 
             // Her güncelleme sonrası render tetikle
             setTimeout(() => forceUpdate(), 0);
@@ -298,9 +482,7 @@ Toplam alınan güncelleme: ${debugInfoRef.current.receivedUpdates}
           });
 
           // Her güncelleme sonrası render tetikle
-          if (data.progress > 0) {
-            forceUpdate();
-          }
+          forceUpdate();
         }
       );
 
@@ -331,6 +513,70 @@ Toplam alınan güncelleme: ${debugInfoRef.current.receivedUpdates}
       };
     }
   }, [downloading, electronAPI]);
+
+  // İndirilen dosyalar değiştiğinde, bu bilgiyi kalıcı olarak kaydet
+  useEffect(() => {
+    const saveDownloadedFilesData = async () => {
+      if (
+        !downloadedFiles.length ||
+        !electronAPI ||
+        !electronAPI.saveDownloadedFiles
+      )
+        return;
+
+      console.log("İndirilen dosyalar kaydediliyor:", downloadedFiles);
+      try {
+        await electronAPI.saveDownloadedFiles(downloadedFiles);
+      } catch (error) {
+        console.error("İndirilen dosyaları kaydetme hatası:", error);
+      }
+    };
+
+    saveDownloadedFilesData();
+  }, [downloadedFiles]);
+
+  // Uygulama başlangıcında kaydedilmiş indirilen dosyaları yükle
+  useEffect(() => {
+    const loadDownloadedFiles = async () => {
+      if (!electronAPI || !electronAPI.getDownloadedFiles) {
+        console.error("getDownloadedFiles API bulunamadı");
+        return;
+      }
+
+      try {
+        const savedFiles = await electronAPI.getDownloadedFiles();
+        console.log("Kaydedilmiş indirilen dosyalar:", savedFiles);
+
+        if (Array.isArray(savedFiles) && savedFiles.length > 0) {
+          setDownloadedFiles(savedFiles);
+        }
+      } catch (error) {
+        console.error("İndirilen dosyaları yükleme hatası:", error);
+      }
+    };
+
+    loadDownloadedFiles();
+  }, []);
+
+  // Zaman göstergesi yerine timer state ekliyorum
+  useEffect(() => {
+    // İndirme işlemi devam ediyorsa, her saniye timerTick'i artır
+    let timerInterval;
+
+    if (downloading) {
+      console.log("Zamanlayıcı başlatıldı");
+      timerInterval = setInterval(() => {
+        setTimerTick((prev) => prev + 1);
+      }, 1000);
+    }
+
+    return () => {
+      if (timerInterval) {
+        console.log("Zamanlayıcı durduruldu");
+        clearInterval(timerInterval);
+      }
+    };
+  }, [downloading]);
 
   // Tekli indirme işlemi
   const downloadSingleStream = async (stream) => {
@@ -455,30 +701,136 @@ Toplam alınan güncelleme: ${debugInfoRef.current.receivedUpdates}
       }
 
       const fileName = `${originalFileName}${fileExtension}`;
+      const fullFilePath = pathUtils.join(targetFolderPath, fileName);
 
       console.log(`İndirme başlatılıyor - URL: ${streamUrl}`);
       console.log(`Dosya: ${fileName} (Uzantı: ${fileExtension})`);
       console.log(`Dizi klasörü: ${seriesFolderPath}`);
       console.log(`Hedef klasör: ${targetFolderPath}`);
+      console.log(`Tam dosya yolu: ${fullFilePath}`);
+
+      // Dosya zaten var mı kontrol et
+      if (electronAPI.checkFileExists) {
+        console.log("Dosya varlığı kontrol ediliyor...");
+
+        const fileCheck = await electronAPI.checkFileExists({
+          filePath: fullFilePath,
+          // Beklenen boyut, varsa kontrol edilebilir ama şu an için null
+          expectedSize: null,
+        });
+
+        console.log("Dosya kontrol sonucu:", fileCheck);
+
+        // Dosya varsa ve boyut olumlu ise
+        if (fileCheck.exists && fileCheck.match) {
+          console.log(
+            `Dosya zaten mevcut, indirme atlanıyor: ${fullFilePath} (Boyut: ${fileCheck.fileSize} byte)`
+          );
+
+          // İndirilen dosyalar listesine ekle
+          setDownloadedFiles((prev) => {
+            // Eğer zaten listedeyse ekleme yapma
+            if (prev.includes(stream.id)) return prev;
+            return [...prev, stream.id];
+          });
+
+          // Kullanıcıya bildir
+          setNotification({
+            open: true,
+            message: `"${
+              stream.title || fileName
+            }" zaten indirilmiş (${formatFileSize(
+              fileCheck.fileSize
+            )}). İndirme atlanıyor.`,
+            severity: "info",
+          });
+
+          // Stream'in seçimini kaldır
+          setStreams((prevStreams) =>
+            prevStreams.map((s) =>
+              s.id === stream.id ? { ...s, selected: false } : s
+            )
+          );
+
+          // Logları güncelle
+          try {
+            // Dosya olduğu için logla (gerçek indirme yapmadık ama sistem için farketmez)
+            if (electronAPI.getDownloadLogs) {
+              // Log için indirme bilgisi oluştur
+              const logInfo = {
+                id: stream.id,
+                title: stream.title || fileName,
+                url: streamUrl,
+                filePath: fullFilePath,
+                fileSize: fileCheck.fileSize,
+                timestamp: Date.now(),
+                skipped: true, // Atlandı bilgisi
+                reason: "Dosya zaten mevcut",
+              };
+
+              // Ana süreçteki log fonksiyonlarını çağır (opsiyonel)
+              // await electronAPI.logDownloadedStream(logInfo);
+            }
+          } catch (logError) {
+            console.error("Log kaydetme hatası:", logError);
+          }
+
+          // İndirmeyi atla
+          return;
+        }
+      }
 
       // İndirme öncesi state'leri güncelle
       setCurrentDownloadingId(stream.id);
       setDownloading(true);
 
+      // İndirme başlangıç zamanını kaydet
+      setDownloadStartTimes((prev) => ({
+        ...prev,
+        [stream.id]: Date.now(),
+      }));
+
       // İndirme öncesi ilerleme state'ini açıkça sıfırla
       console.log(`${stream.id} için ilerleme state'i sıfırlanıyor...`);
-      // State'i doğrudan güncelle, önceki versiyonu kullanma
+
+      // İlerleme bilgisini daha kapsamlı olarak başlat
       setDownloadProgress((prev) => {
         const newState = { ...prev };
-        newState[stream.id] = { progress: 0, received: 0, total: 0 };
+        // Stream ID için ilerleme durumunu oluştur
+        newState[stream.id] = {
+          progress: 0,
+          received: 0,
+          total: 0,
+          timestamp: Date.now(),
+          fileName: fileName, // Dosya adını da ekle (main.js'den gelen data.id ile eşleştirebilmek için)
+        };
+
+        // Dosya adı için de aynı ilerleme durumunu oluştur (ana süreç dosya adını ID olarak kullanıyor)
+        newState[fileName] = {
+          progress: 0,
+          received: 0,
+          total: 0,
+          timestamp: Date.now(),
+          streamId: stream.id, // Stream ID'sini de ekle (iki yönlü eşleştirme için)
+        };
+
         return newState;
       });
+
+      // Force render
+      forceUpdate();
 
       const params = {
         url: streamUrl,
         fileName,
         downloadDir: targetFolderPath, // Organize edilmiş klasör yapısını kullan
         createFolders: true, // Klasörleri oluştur bayrağını ekle
+        streamInfo: {
+          // Stream bilgilerini ekle
+          id: stream.id,
+          title: stream.title || fileName,
+          url: streamUrl,
+        },
       };
 
       const result = await electronAPI.downloadStream(params);
@@ -486,6 +838,13 @@ Toplam alınan güncelleme: ${debugInfoRef.current.receivedUpdates}
       if (result.success) {
         // İndirilen dosyalar listesine ekle
         setDownloadedFiles((prev) => [...prev, stream.id]);
+
+        // Stream'in seçimini kaldır
+        setStreams((prevStreams) =>
+          prevStreams.map((s) =>
+            s.id === stream.id ? { ...s, selected: false } : s
+          )
+        );
 
         setNotification({
           open: true,
@@ -561,11 +920,96 @@ Toplam alınan güncelleme: ${debugInfoRef.current.receivedUpdates}
     setNotification({ ...notification, open: false });
   };
 
+  // Checkboxları işleyen fonksiyonlar
+  const handleSelectStream = (id) => {
+    setStreams((prevStreams) =>
+      prevStreams.map((stream) =>
+        stream.id === id ? { ...stream, selected: !stream.selected } : stream
+      )
+    );
+  };
+
+  const handleSelectAll = (event) => {
+    const checked = event.target.checked;
+    setStreams((prevStreams) =>
+      prevStreams.map((stream) => ({ ...stream, selected: checked }))
+    );
+  };
+
+  // Seçili stream'leri sırasıyla indirme işlemi
+  const downloadSelectedStreams = async () => {
+    if (!downloadDir) {
+      setNotification({
+        open: true,
+        message: "Lütfen önce indirme klasörünü seçin.",
+        severity: "warning",
+      });
+      return;
+    }
+
+    // Seçili stream ID'lerini al
+    const selectedStreamIds = streams
+      .filter((stream) => stream.selected)
+      .map((stream) => stream.id);
+
+    if (selectedStreamIds.length === 0) {
+      setNotification({
+        open: true,
+        message: "Lütfen en az bir stream seçin.",
+        severity: "warning",
+      });
+      return;
+    }
+
+    // Seçili stream'leri kuyruğa ekle
+    setDownloadQueue(selectedStreamIds);
+    setBatchDownloading(true);
+  };
+
+  // Kuyruktaki bir sonraki stream'i indir
+  useEffect(() => {
+    const downloadNextInQueue = async () => {
+      // Eğer indirme işlemi zaten devam ediyorsa, bekle
+      if (downloading) return;
+
+      // Kuyrukta eleman varsa ve toplu indirme modu aktifse
+      if (downloadQueue.length > 0 && batchDownloading) {
+        const nextStreamId = downloadQueue[0];
+        const streamToDownload = streams.find((s) => s.id === nextStreamId);
+
+        if (streamToDownload) {
+          // İndirme kuyruğundan çıkar
+          setDownloadQueue((prevQueue) => prevQueue.slice(1));
+          // İndirme işlemini başlat
+          await downloadSingleStream(streamToDownload);
+        }
+      } else if (downloadQueue.length === 0 && batchDownloading) {
+        // Tüm indirme işlemleri tamamlandığında
+        setBatchDownloading(false);
+        setNotification({
+          open: true,
+          message: "Tüm seçili stream'lerin indirme işlemi tamamlandı.",
+          severity: "success",
+        });
+      }
+    };
+
+    downloadNextInQueue();
+  }, [downloadQueue, downloading, batchDownloading, streams]);
+
+  // Tekrar indirme fonksiyonu
+  const redownloadStream = async (stream) => {
+    // Önce indirilen dosyalar listesinden çıkar
+    setDownloadedFiles((prev) => prev.filter((id) => id !== stream.id));
+    // Sonra indirme işlemini başlat
+    await downloadSingleStream(stream);
+  };
+
   return (
     <Container maxWidth="lg">
       <Box sx={{ my: 4 }}>
         <Typography variant="h4" component="h1" gutterBottom>
-          M3U Dosya İndirici
+          M3U Downloader
         </Typography>
 
         <Box className="action-buttons">
@@ -573,7 +1017,7 @@ Toplam alınan güncelleme: ${debugInfoRef.current.receivedUpdates}
             variant="contained"
             startIcon={<FileOpenIcon />}
             onClick={() => loadM3uFile()}
-            disabled={loading || downloading}
+            disabled={loading || downloading || batchDownloading}
           >
             M3U Dosyası Seç
           </Button>
@@ -582,11 +1026,42 @@ Toplam alınan güncelleme: ${debugInfoRef.current.receivedUpdates}
             variant="contained"
             startIcon={<FolderOpenIcon />}
             onClick={selectDownloadFolder}
-            disabled={loading || downloading}
+            disabled={loading || downloading || batchDownloading}
           >
             İndirme Klasörü Seç
           </Button>
+
+          {streams.length > 0 && (
+            <Button
+              variant="contained"
+              color="primary"
+              startIcon={<DownloadIcon />}
+              onClick={downloadSelectedStreams}
+              disabled={
+                loading ||
+                downloading ||
+                batchDownloading ||
+                streams.filter((s) => s.selected).length === 0
+              }
+              sx={{ ml: 2 }}
+            >
+              Seçili Stream'leri İndir
+              {streams.filter((s) => s.selected).length > 0 &&
+                ` (${streams.filter((s) => s.selected).length})`}
+            </Button>
+          )}
         </Box>
+
+        {/* Toplu indirme durumunda gösterilecek bilgi */}
+        {batchDownloading && (
+          <Box sx={{ mt: 2, display: "flex", alignItems: "center" }}>
+            <CircularProgress size={20} sx={{ mr: 1 }} />
+            <Typography variant="body2" color="primary">
+              Seçili dosyalar sırayla indiriliyor... (Kalan:{" "}
+              {downloadQueue.length})
+            </Typography>
+          </Box>
+        )}
 
         {/* Seçilen dosya ve klasör yolları */}
         {m3uFilePath && (
@@ -637,6 +1112,19 @@ Toplam alınan güncelleme: ${debugInfoRef.current.receivedUpdates}
               <Table size="small">
                 <TableHead>
                   <TableRow>
+                    <TableCell padding="checkbox">
+                      <Checkbox
+                        color="primary"
+                        onChange={handleSelectAll}
+                        checked={
+                          streams.length > 0 && streams.every((s) => s.selected)
+                        }
+                        indeterminate={
+                          streams.some((s) => s.selected) &&
+                          !streams.every((s) => s.selected)
+                        }
+                      />
+                    </TableCell>
                     <TableCell>Başlık</TableCell>
                     <TableCell>URL</TableCell>
                     <TableCell align="center" width="150">
@@ -649,10 +1137,37 @@ Toplam alınan güncelleme: ${debugInfoRef.current.receivedUpdates}
                     const isDownloading =
                       downloading && currentDownloadingId === stream.id;
                     const isDownloaded = downloadedFiles.includes(stream.id);
-                    const progress = downloadProgress[stream.id]?.progress || 0;
+
+                    // İlerleme takibi için değişkenler
+                    let progress = 0;
+                    let progressData = null;
+
+                    // Hem stream ID hem de olası dosya adı üzerinden ilerleme bilgisi kontrol edilmeli
+                    if (downloadProgress[stream.id]) {
+                      progressData = downloadProgress[stream.id];
+                      progress = progressData.progress || 0;
+                    }
+
+                    // Stream ID'sine göre bulunan bilgiler
+                    const received = progressData?.received || 0;
+                    const total = progressData?.total || 0;
+                    const timestamp = progressData?.timestamp || 0;
+
+                    // Gösterim için yüzde hesapla
+                    const displayProgress = Math.round(progress * 100);
 
                     return (
                       <TableRow key={stream.id} hover>
+                        <TableCell padding="checkbox">
+                          <Checkbox
+                            color="primary"
+                            checked={stream.selected}
+                            onChange={() => handleSelectStream(stream.id)}
+                            disabled={
+                              isDownloading || isDownloaded || batchDownloading
+                            }
+                          />
+                        </TableCell>
                         <TableCell>{stream.title || "İsimsiz"}</TableCell>
                         <TableCell
                           sx={{
@@ -673,12 +1188,27 @@ Toplam alınan güncelleme: ${debugInfoRef.current.receivedUpdates}
                             }}
                           >
                             {isDownloaded && !isDownloading ? (
-                              <Tooltip title="İndirildi">
-                                <CheckCircleIcon
-                                  color="success"
-                                  sx={{ mr: 1 }}
-                                />
-                              </Tooltip>
+                              <Box
+                                sx={{ display: "flex", alignItems: "center" }}
+                              >
+                                <Tooltip title="İndirildi">
+                                  <CheckCircleIcon
+                                    color="success"
+                                    sx={{ mr: 1 }}
+                                  />
+                                </Tooltip>
+                                <Tooltip title="Tekrar İndir">
+                                  <IconButton
+                                    color="primary"
+                                    onClick={() => redownloadStream(stream)}
+                                    disabled={downloading || batchDownloading}
+                                    size="small"
+                                    sx={{ ml: 1 }}
+                                  >
+                                    <DownloadIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+                              </Box>
                             ) : (
                               <Tooltip
                                 title={
@@ -691,14 +1221,14 @@ Toplam alınan güncelleme: ${debugInfoRef.current.receivedUpdates}
                                   <IconButton
                                     color="primary"
                                     onClick={() => downloadSingleStream(stream)}
-                                    disabled={downloading}
+                                    disabled={downloading || batchDownloading}
                                     size="small"
                                   >
                                     {isDownloading ? (
                                       <CircularProgress
                                         size={24}
                                         variant="determinate"
-                                        value={progress || 0}
+                                        value={displayProgress}
                                       />
                                     ) : (
                                       <DownloadIcon />
@@ -720,7 +1250,7 @@ Toplam alınan güncelleme: ${debugInfoRef.current.receivedUpdates}
                               >
                                 <LinearProgress
                                   variant="determinate"
-                                  value={progress || 0}
+                                  value={displayProgress}
                                   sx={{ height: 10, borderRadius: 5 }}
                                 />
                                 <Typography
@@ -732,25 +1262,36 @@ Toplam alınan güncelleme: ${debugInfoRef.current.receivedUpdates}
                                     mt: 0.5,
                                   }}
                                 >
-                                  %{progress || 0}
-                                  <span
-                                    style={{
-                                      fontSize: "0.6rem",
-                                      opacity: 0.7,
-                                      marginLeft: "3px",
-                                    }}
-                                  >
-                                    {downloadProgress[stream.id]?.timestamp
-                                      ? `(${Math.floor(
-                                          (Date.now() -
-                                            downloadProgress[stream.id]
-                                              ?.timestamp) /
-                                            1000
-                                        )}s önce)`
-                                      : ""}
-                                  </span>
+                                  %{displayProgress}
+                                  {timestamp > 0 && (
+                                    <span
+                                      style={{
+                                        fontSize: "0.6rem",
+                                        opacity: 0.7,
+                                        marginLeft: "3px",
+                                      }}
+                                    >
+                                      {(() => {
+                                        // Başlangıç zamanı varsa o zaman damgasını kullan, yoksa state'teki timestamp değerini
+                                        const startTime =
+                                          downloadStartTimes[stream.id] ||
+                                          timestamp;
+                                        // timerTick burada bağımlılık olarak kullanılıyor,
+                                        // böylece her saniye güncellenecek
+                                        timerTick;
+                                        // Geçen süreyi hesapla
+                                        const elapsedSeconds = Math.max(
+                                          1,
+                                          Math.floor(
+                                            (Date.now() - startTime) / 1000
+                                          )
+                                        );
+                                        return `(${elapsedSeconds}s önce)`;
+                                      })()}
+                                    </span>
+                                  )}
                                 </Typography>
-                                {downloadProgress[stream.id]?.total > 0 && (
+                                {total > 0 && (
                                   <Typography
                                     variant="caption"
                                     sx={{
@@ -759,13 +1300,8 @@ Toplam alınan güncelleme: ${debugInfoRef.current.receivedUpdates}
                                       fontSize: "0.6rem",
                                     }}
                                   >
-                                    {formatFileSize(
-                                      downloadProgress[stream.id]?.received || 0
-                                    )}{" "}
-                                    /{" "}
-                                    {formatFileSize(
-                                      downloadProgress[stream.id]?.total || 0
-                                    )}
+                                    {formatFileSize(received)} /{" "}
+                                    {formatFileSize(total)}
                                   </Typography>
                                 )}
                               </Box>
@@ -779,7 +1315,7 @@ Toplam alınan güncelleme: ${debugInfoRef.current.receivedUpdates}
                   {/* Boş satırlar durumunu kontrol et */}
                   {currentPageRows.length === 0 && (
                     <TableRow style={{ height: 53 }}>
-                      <TableCell colSpan={3} align="center">
+                      <TableCell colSpan={4} align="center">
                         {searchQuery
                           ? "Aramanızla eşleşen veri bulunamadı."
                           : "Hiç stream verisi bulunamadı."}
@@ -808,6 +1344,12 @@ Toplam alınan güncelleme: ${debugInfoRef.current.receivedUpdates}
             <Box sx={{ mt: 2 }}>
               <Typography variant="body2">
                 Toplam {filteredStreams.length} stream listeleniyor
+                {streams.filter((s) => s.selected).length > 0 &&
+                  ` (${
+                    streams.filter((s) => s.selected).length
+                  } tanesi seçili)`}
+                {downloadQueue.length > 0 &&
+                  ` - Kuyruktaki dosya sayısı: ${downloadQueue.length}`}
               </Typography>
             </Box>
           </>

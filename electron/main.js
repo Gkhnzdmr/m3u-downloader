@@ -2,18 +2,56 @@ const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const storage = require("electron-json-storage");
+const https = require("https");
+const http = require("http");
+const fsPromises = require("fs/promises");
 
 // Debug modunu kontrol et (--debug argümanı ile başlatılmışsa)
 const isDebugMode = process.argv.includes("--debug");
 
+// Aktif indirme işlemlerini takip etmek için global değişken
+global.activeDownloads = new Map();
+
 let mainWindow;
 
 function createWindow() {
-  // Uygulama veri dizinini ayarla
-  storage.setDataPath(app.getPath("userData"));
+  // Uygulama veri dizinini ayarla - kalıcı ve cihaza özgü olması için userDataPath kullan
+  const userDataPath = app.getPath("userData");
+  storage.setDataPath(userDataPath);
+
+  // Cihaz kimliği oluştur/kontrol et
+  const deviceIdFile = path.join(userDataPath, "device-id.json");
+  let deviceId;
+
+  try {
+    if (fs.existsSync(deviceIdFile)) {
+      // Var olan cihaz kimliğini oku
+      const deviceData = JSON.parse(fs.readFileSync(deviceIdFile, "utf8"));
+      deviceId = deviceData.deviceId;
+      console.log("Mevcut cihaz kimliği kullanılıyor:", deviceId);
+    } else {
+      // Yeni bir cihaz kimliği oluştur
+      deviceId = `device_${Date.now()}_${Math.random()
+        .toString(36)
+        .substring(2, 11)}`;
+      fs.writeFileSync(
+        deviceIdFile,
+        JSON.stringify({ deviceId, createdAt: new Date().toISOString() })
+      );
+      console.log("Yeni cihaz kimliği oluşturuldu:", deviceId);
+    }
+  } catch (error) {
+    console.error("Cihaz kimliği işlemi hatası:", error);
+    // Hata durumunda varsayılan bir kimlik kullan
+    deviceId = `device_fallback_${Date.now()}`;
+  }
+
+  // Global değişken olarak cihaz kimliğini kaydet
+  global.deviceId = deviceId;
 
   // Log bilgileri
-  console.log("Uygulama veri dizini:", app.getPath("userData"));
+  console.log("Uygulama veri dizini:", userDataPath);
+  console.log("Cihaz kimliği:", deviceId);
   console.log("Preload path:", path.join(__dirname, "preload.js"));
   console.log("HTML path:", path.join(__dirname, "../dist/index.html"));
   console.log("Debug mode:", isDebugMode);
@@ -33,7 +71,25 @@ function createWindow() {
   try {
     // Debug modunda debug.html yükle, normal modda index.html yükle
     const htmlFileName = isDebugMode ? "debug.html" : "index.html";
-    const htmlPath = path.join(__dirname, `../dist/${htmlFileName}`);
+
+    // Paketlenmiş uygulama tespiti
+    const isPackaged = app.isPackaged;
+    let htmlPath;
+
+    if (isPackaged) {
+      // Paketlenmiş uygulamada
+      htmlPath = path.join(
+        process.resourcesPath,
+        "app.asar",
+        "dist",
+        htmlFileName
+      );
+      console.log("Paketlenmiş uygulama, HTML path:", htmlPath);
+    } else {
+      // Geliştirme modunda
+      htmlPath = path.join(__dirname, "../dist", htmlFileName);
+      console.log("Geliştirme modu, HTML path:", htmlPath);
+    }
 
     if (fs.existsSync(htmlPath)) {
       console.log(`HTML dosyası bulundu (${htmlFileName}):`, htmlPath);
@@ -43,7 +99,7 @@ function createWindow() {
       console.error(`HTML dosyası bulunamadı (${htmlFileName}):`, htmlPath);
       // Hata durumunda basit bir HTML göster
       mainWindow.loadURL(
-        `data:text/html,<h1>Hata: ${htmlFileName} bulunamadı!</h1>`
+        `data:text/html,<h1>Hata: ${htmlFileName} bulunamadı!</h1><p>Aranan konum: ${htmlPath}</p>`
       );
     }
   } catch (error) {
@@ -52,7 +108,7 @@ function createWindow() {
   }
 
   // Geliştirme araçlarını her zaman aç
-  mainWindow.webContents.openDevTools();
+  //mainWindow.webContents.openDevTools();
 
   // Hataları yakala
   mainWindow.webContents.on(
@@ -70,6 +126,46 @@ function createWindow() {
     }
   );
 }
+
+// Uygulama kapanmadan önce yarım kalan indirmeleri temizleyen fonksiyon
+function cleanupDownloads() {
+  try {
+    console.log("Yarım kalan indirmeler temizleniyor...");
+    if (global.activeDownloads.size === 0) {
+      console.log("Aktif indirme bulunmuyor.");
+      return;
+    }
+
+    console.log(
+      `${global.activeDownloads.size} adet yarım kalan indirme temizlenecek.`
+    );
+
+    // Tüm aktif indirmelerin dosyalarını silme
+    for (const [filePath, fileInfo] of global.activeDownloads.entries()) {
+      try {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+          console.log(`Yarım kalan dosya silindi: ${filePath}`);
+        } else {
+          console.log(`Dosya zaten silinmiş: ${filePath}`);
+        }
+      } catch (error) {
+        console.error(`Dosya silme hatası (${filePath}):`, error.message);
+      }
+    }
+
+    // Listeyi temizle
+    global.activeDownloads.clear();
+  } catch (error) {
+    console.error("Temizleme hatası:", error);
+  }
+}
+
+// Uygulama kapanmadan önce yarım kalan indirmeleri temizle
+app.on("before-quit", () => {
+  console.log("Uygulama kapanıyor, temizlik yapılıyor...");
+  cleanupDownloads();
+});
 
 // Uygulama hazır olduğunda penceremizi oluşturalım
 app.whenReady().then(() => {
@@ -161,499 +257,733 @@ ipcMain.handle("get-saved-paths", async () => {
   });
 });
 
-// Dosya indirme işlemi
+// İndirilen dosyaları kaydetme
+ipcMain.handle("save-downloaded-files", async (event, downloadedFiles) => {
+  console.log("save-downloaded-files isteği alındı");
+  return new Promise((resolve) => {
+    // Cihaz kimliğini içeren benzersiz bir depolama anahtarı kullan
+    const storageKey = `downloadedFiles_${global.deviceId}`;
+
+    storage.set(storageKey, downloadedFiles, (error) => {
+      if (error) {
+        console.error("İndirilen dosyalar kaydedilemedi", error);
+        resolve({ success: false, error: error.message });
+      } else {
+        console.log("İndirilen dosyalar kaydedildi:", downloadedFiles);
+        console.log("Depolama anahtarı:", storageKey);
+        resolve({ success: true });
+      }
+    });
+  });
+});
+
+// İndirilen dosyaları alma
+ipcMain.handle("get-downloaded-files", async () => {
+  console.log("get-downloaded-files isteği alındı");
+  return new Promise((resolve) => {
+    // Cihaz kimliğini içeren benzersiz bir depolama anahtarı kullan
+    const storageKey = `downloadedFiles_${global.deviceId}`;
+
+    storage.get(storageKey, (error, data) => {
+      if (error) {
+        console.error("İndirilen dosyalar alınamadı", error);
+        resolve([]);
+      } else {
+        console.log("İndirilen dosyalar alındı:", data);
+        console.log("Depolama anahtarı:", storageKey);
+        // data boş veya null ise boş dizi döndür
+        resolve(data || []);
+      }
+    });
+  });
+});
+
+// İndirme işlemi
 ipcMain.handle(
   "download-stream",
-  async (event, { url, fileName, downloadDir, createFolders }) => {
+  async (event, { url, fileName, downloadDir, createFolders, streamInfo }) => {
+    console.log(`İndirme isteği: ${fileName}`);
+    console.log(`URL: ${url}`);
+    console.log(`İndirme klasörü: ${downloadDir}`);
+
+    return await downloadSingleStream(
+      url,
+      fileName,
+      downloadDir,
+      createFolders,
+      streamInfo
+    );
+  }
+);
+
+// Tekli stream indirme fonksiyonu
+async function downloadSingleStream(
+  url,
+  fileName,
+  downloadDir,
+  createFolders = false,
+  streamInfo = null
+) {
+  console.log(`İndirme başlatılıyor - ${url}`);
+  // Dosya yolu değişkenini fonksiyon seviyesinde tanımla
+  let filePath = null;
+
+  try {
+    // URL'nin geçerli olduğundan emin ol
     try {
-      console.log(`download-stream isteği alındı: ${fileName}`);
-      console.log(`URL: ${url}`);
-      console.log(`İndirme dizini: ${downloadDir}`);
-      console.log(`Klasör oluştur: ${createFolders}`);
-
-      // URL kontrolü
-      if (!url || typeof url !== "string") {
-        console.error("Geçersiz URL:", url);
-        return {
-          success: false,
-          error: `Geçersiz URL: ${url ? JSON.stringify(url) : "URL boş"}`,
-        };
+      // Boşlukları ve sorunlu karakterleri düzelt
+      if (url.includes(" ")) {
+        const originalUrl = url;
+        url = url.replace(/ /g, "%20");
+        console.log(`URL'deki boşluklar düzeltildi: ${originalUrl} -> ${url}`);
       }
 
-      // URL protokol kontrolü
-      if (!url.startsWith("http://") && !url.startsWith("https://")) {
-        console.error("Desteklenmeyen URL protokolü:", url);
-        return {
-          success: false,
-          error: `Desteklenmeyen URL protokolü. URL http:// veya https:// ile başlamalıdır`,
-        };
-      }
-
-      // Dosya yolu kontrolü
-      if (!downloadDir || typeof downloadDir !== "string") {
-        console.error("Geçersiz indirme dizini:", downloadDir);
-        return {
-          success: false,
-          error: `Geçersiz indirme dizini: ${
-            downloadDir ? JSON.stringify(downloadDir) : "Dizin boş"
-          }`,
-        };
-      }
-
-      // Dosya adı kontrolü
-      if (!fileName || typeof fileName !== "string") {
-        console.error("Geçersiz dosya adı:", fileName);
-        return {
-          success: false,
-          error: `Geçersiz dosya adı: ${
-            fileName ? JSON.stringify(fileName) : "Dosya adı boş"
-          }`,
-        };
-      }
-
-      // Klasör yolunu oluştur (eğer yoksa)
+      // URL'yi kontrol et
+      new URL(url);
+    } catch (urlError) {
+      console.error("Geçersiz URL formatı:", urlError.message);
+      // URL'yi encode etmeyi dene
       try {
-        if (createFolders && !fs.existsSync(downloadDir)) {
-          console.log(`Klasör oluşturuluyor: ${downloadDir}`);
+        url = encodeURI(url);
+        console.log(`URL encode edildi: ${url}`);
+      } catch (encodeError) {
+        console.error("URL encode hatası:", encodeError.message);
+        throw new Error(`Geçersiz URL formatı: ${urlError.message}`);
+      }
+    }
 
-          // Dizin yolunun her seviyesini oluştur (recursive)
-          fs.mkdirSync(downloadDir, { recursive: true });
-          console.log(`Klasör başarıyla oluşturuldu: ${downloadDir}`);
-        }
-      } catch (err) {
-        console.error(`Klasör oluşturma hatası: ${err.message}`);
-        return {
-          success: false,
-          error: `Klasör oluşturulamadı: ${err.message}`,
-        };
+    // Klasörleri oluştur
+    if (createFolders) {
+      await fsPromises.mkdir(downloadDir, { recursive: true });
+    }
+
+    // Dosya yolu
+    filePath = path.join(downloadDir, fileName);
+    console.log(`Hedef dosya: ${filePath}`);
+
+    // Aktif indirmeyi listeye ekle
+    global.activeDownloads.set(filePath, {
+      url,
+      fileName,
+      downloadDir,
+      streamInfo,
+      startTime: Date.now(),
+    });
+
+    // URL protokolünü kontrol et
+    let currentUrl = url;
+    const maxRedirects = 5; // Maksimum yönlendirme sayısı
+    let redirectCount = 0;
+
+    // Akış başlatma
+    console.log(`${currentUrl} indirme başlatılıyor...`);
+
+    // HTTP isteği için daha güçlü timeout ve yeniden deneme mantığı ekleyelim
+    const maxRetries = 3;
+    let retryCount = 0;
+    let success = false;
+    let responseError = null;
+    let fileSize = 0;
+
+    // İlerleme takibi için değişkenler
+    let lastProgressUpdateTime = Date.now();
+    let lastReceivedBytes = 0;
+    let receivedBytes = 0;
+    let totalBytes = 0;
+    let lastProgressValue = 0;
+
+    // Zorlu güncelleme zamanlayıcısı
+    let forceUpdateTimer = null;
+
+    // Sık aralıklarla ilerleme güncellemesi göndermek için timer
+    const startForceProgressUpdates = () => {
+      // Önceki timer varsa temizle
+      if (forceUpdateTimer) {
+        clearInterval(forceUpdateTimer);
       }
 
-      const filePath = path.join(downloadDir, fileName);
+      // Her 2 saniyede bir ilerleme güncellemesi gönder
+      forceUpdateTimer = setInterval(() => {
+        // Son güncellemeden bu yana geçen süre
+        const timeSinceLastUpdate = Date.now() - lastProgressUpdateTime;
 
-      // Dizin var mı kontrol et
-      try {
-        if (!fs.existsSync(downloadDir)) {
-          console.error(`İndirme dizini bulunamadı: ${downloadDir}`);
-          return {
-            success: false,
-            error: `İndirme dizini bulunamadı: ${downloadDir}`,
-          };
-        }
+        // Eğer 2 saniyeden fazla süre geçtiyse ve indirme devam ediyorsa zorla güncelleme gönder
+        if (timeSinceLastUpdate > 2000 && receivedBytes > 0) {
+          console.log("Zorla ilerleme güncellemesi gönderiliyor...");
+          const progress = totalBytes ? receivedBytes / totalBytes : 0;
 
-        // Dizine yazma izni var mı kontrol et
-        fs.accessSync(downloadDir, fs.constants.W_OK);
-      } catch (err) {
-        console.error(`Dizin erişim hatası: ${err.message}`);
-        return {
-          success: false,
-          error: `İndirme dizinine yazma erişimi yok: ${err.message}`,
-        };
-      }
+          // İlerleme durumunu sadece bir kez gönder
+          if (progress !== lastProgressValue) {
+            lastProgressValue = progress;
+            // İlerleme bilgisini güncelle
+            try {
+              mainWindow.webContents.send("download-progress", {
+                id: fileName,
+                progress: progress,
+                received: receivedBytes,
+                total: totalBytes,
+                forced: true, // Zorla gönderildiğini belirt
+              });
+            } catch (sendError) {
+              console.error(
+                "İlerleme bilgisi gönderme hatası:",
+                sendError.message
+              );
+            }
 
-      // Mevcut dosyayı kontrol et ve varsa sil
-      if (fs.existsSync(filePath)) {
-        console.log(`Dosya zaten var, siliniyor: ${filePath}`);
-        try {
-          fs.unlinkSync(filePath);
-        } catch (err) {
-          console.error(`Mevcut dosya silinemedi: ${err.message}`);
-          return {
-            success: false,
-            error: `Mevcut dosya silinemedi: ${err.message}`,
-          };
-        }
-      }
-
-      return new Promise((resolve, reject) => {
-        const file = fs.createWriteStream(filePath);
-
-        let receivedBytes = 0;
-        let totalBytes = 0;
-
-        // Yönlendirmeleri yönetmek için fonksiyon
-        const handleRequest = (currentUrl, redirectCount = 0) => {
-          // Maximum yönlendirme sayısı kontrolü
-          if (redirectCount > 5) {
-            const error = "Çok fazla yönlendirme (maksimum 5)";
-            console.error(error);
-            file.close();
-            fs.unlinkSync(filePath);
-            reject({ success: false, error });
-            return;
+            // Son güncelleme zamanını güncelle
+            lastProgressUpdateTime = Date.now();
           }
+        }
+      }, 2000);
+    };
 
-          console.log(
-            `HTTP istek başlatılıyor (${
-              redirectCount > 0 ? "yönlendirme #" + redirectCount : "ilk istek"
-            }): ${currentUrl}`
-          );
+    // İndirme bittiğinde timer'ı temizle
+    const stopForceProgressUpdates = () => {
+      if (forceUpdateTimer) {
+        clearInterval(forceUpdateTimer);
+        forceUpdateTimer = null;
+      }
+    };
 
-          const proto = currentUrl.startsWith("https") ? "https" : "http";
-          const http = proto === "https" ? require("https") : require("http");
+    while (retryCount < maxRetries && !success) {
+      try {
+        if (retryCount > 0) {
+          console.log(`Yeniden deneme ${retryCount}/${maxRetries}...`);
+          // Yeniden denemeler arasında kısa bir bekleme yapalım
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
 
-          const urlObj = new URL(currentUrl);
+        // Yönlendirme işlemini burada gerçekleştireceğiz
+        let finalResponse = null;
+        let currentRedirectUrl = currentUrl;
+        redirectCount = 0;
 
-          const options = {
-            hostname: urlObj.hostname,
-            path: urlObj.pathname + urlObj.search,
-            method: "GET",
-            headers: {
-              "User-Agent":
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36",
-              Accept: "*/*",
-            },
-          };
+        while (redirectCount < maxRedirects && !finalResponse) {
+          try {
+            // URL protokolünü her yönlendirmede kontrol et
+            let urlObj;
+            try {
+              urlObj = new URL(currentRedirectUrl);
+            } catch (urlError) {
+              console.error("Geçersiz URL:", urlError.message);
+              currentRedirectUrl = encodeURI(currentRedirectUrl);
+              urlObj = new URL(currentRedirectUrl);
+            }
 
-          const request = http.request(options, (response) => {
+            const isHttps = urlObj.protocol === "https:";
+            const httpModule = isHttps ? https : http;
+            console.log(
+              `Protokol: ${urlObj.protocol} (${
+                isHttps ? "HTTPS" : "HTTP"
+              } kullanılacak)`
+            );
+
+            // HTTP isteğini oluştur
+            const response = await new Promise((resolve, reject) => {
+              console.log(
+                `HTTP isteği (${
+                  redirectCount > 0
+                    ? "yönlendirme #" + redirectCount
+                    : "ilk istek"
+                }): ${currentRedirectUrl}`
+              );
+
+              // Node.js HTTP isteği için URL değil tam URL objesi kullan
+              const options = {
+                hostname: urlObj.hostname,
+                path: urlObj.pathname + urlObj.search,
+                method: "GET",
+                timeout: 30000, // 30 saniye timeout
+                headers: {
+                  "User-Agent":
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                },
+              };
+
+              const request = httpModule.request(options, (response) => {
+                resolve(response);
+              });
+
+              request.on("error", (err) => {
+                console.error(
+                  `İndirme isteği hatası (${retryCount + 1}. deneme):`,
+                  err.message
+                );
+                reject(err);
+              });
+
+              request.on("timeout", () => {
+                request.destroy();
+                reject(new Error("İstek zaman aşımına uğradı"));
+              });
+
+              // İsteği sonlandır
+              request.end();
+            });
+
             // Yönlendirme kontrolü (3xx yanıt kodları)
             if (
               response.statusCode >= 300 &&
               response.statusCode < 400 &&
               response.headers.location
             ) {
+              const location = response.headers.location;
               console.log(
-                `Yönlendirme alındı: ${response.statusCode}, yeni URL: ${response.headers.location}`
+                `Yönlendirme alındı: ${response.statusCode}, yeni URL: ${location}`
               );
 
-              // Yönlendirme URL'sini al
-              let redirectUrl = response.headers.location;
-
-              // Göreli URL'yi mutlak URL'ye dönüştür
-              if (redirectUrl.startsWith("/")) {
-                redirectUrl = `${urlObj.protocol}//${urlObj.host}${redirectUrl}`;
-              } else if (!redirectUrl.startsWith("http")) {
+              // Mutlak veya göreli URL kontrolü
+              let redirectUrl = location;
+              if (location.startsWith("/")) {
+                // Göreli yol, mevcut host ile birleştir
+                const baseUrl = `${urlObj.protocol}//${urlObj.host}`;
+                redirectUrl = baseUrl + location;
+              } else if (
+                !location.startsWith("http://") &&
+                !location.startsWith("https://")
+              ) {
                 // Base URL olmadan göreli path
                 const basePath = urlObj.pathname.substring(
                   0,
                   urlObj.pathname.lastIndexOf("/") + 1
                 );
-                redirectUrl = `${urlObj.protocol}//${urlObj.host}${basePath}${redirectUrl}`;
+                redirectUrl = `${urlObj.protocol}//${urlObj.host}${basePath}${location}`;
               }
+
+              console.log(`Yönlendirme URL'si: ${redirectUrl}`);
+
+              // Yeni URL ile devam et
+              currentRedirectUrl = redirectUrl;
+              redirectCount++;
 
               // İsteği temizle
               response.destroy();
 
-              // Yeni URL'ye istek yap
-              handleRequest(redirectUrl, redirectCount + 1);
-              return;
-            }
-
-            // Hata yanıtı kontrolü
-            if (response.statusCode !== 200) {
-              const error = `Sunucu hatası: ${response.statusCode} ${response.statusMessage}`;
-              console.error(error);
-              file.close();
-              fs.unlinkSync(filePath);
-              reject({ success: false, error });
-              return;
-            }
-
-            // Toplam dosya boyutunu al
-            totalBytes = parseInt(response.headers["content-length"] || 0, 10);
-
-            // Content-Type başlığından MIME türünü kontrol et
-            const contentType = response.headers["content-type"] || "";
-            console.log(`İçerik türü: ${contentType}`);
-
-            // MIME türü doğru uzantı eşleşmesi
-            const mimeToExtensionMap = {
-              "video/mp4": ".mp4",
-              "video/mpeg": ".mpg",
-              "video/x-msvideo": ".avi",
-              "video/quicktime": ".mov",
-              "video/x-matroska": ".mkv",
-              "application/octet-stream": "", // Özel uzantı gerektirmez, orijinal uzantıyı koru
-              "video/x-flv": ".flv",
-              "video/webm": ".webm",
-              "video/x-ms-wmv": ".wmv",
-              "video/ts": ".ts",
-              "video/MP2T": ".ts",
-              "application/x-mpegurl": ".m3u8",
-              "video/3gpp": ".3gp",
-              "audio/mpeg": ".mp3",
-              "audio/mp4": ".m4a",
-              "audio/aac": ".aac",
-              "audio/ogg": ".ogg",
-              "audio/wav": ".wav",
-              "audio/webm": ".weba",
-              "image/jpeg": ".jpg",
-              "image/png": ".png",
-              "image/gif": ".gif",
-            };
-
-            // Dosya uzantısını kontrol et
-            const baseFileName = path.basename(
-              fileName,
-              path.extname(fileName)
-            );
-            let suggestedExtension = "";
-
-            // MIME türünden uzantı öner
-            for (const [mimeType, ext] of Object.entries(mimeToExtensionMap)) {
-              if (contentType.toLowerCase().includes(mimeType.toLowerCase())) {
-                suggestedExtension = ext;
-                break;
-              }
-            }
-
-            console.log(
-              `İndirme başladı: ${fileName}, Toplam boyut: ${totalBytes} bayt`
-            );
-
-            // İlerlemeyi izle
-            response.on("data", (chunk) => {
-              receivedBytes += chunk.length;
-
-              if (totalBytes > 0) {
-                const progress = Math.round((receivedBytes / totalBytes) * 100);
-
-                // Detaylı debug log'ları
-                console.log(`
------- İLERLEME BİLGİSİ ------
-Dosya: ${fileName}
-Alınan: ${receivedBytes} bayt
-Toplam: ${totalBytes} bayt
-İlerleme: %${progress}
-------------------------------
-`);
-
-                // İlerleme bilgisini gönder
-                try {
-                  // Her veri parçası alındığında ilerleme bilgisini gönder
-                  const progressData = {
-                    id: fileName,
-                    progress,
-                    received: receivedBytes,
-                    total: totalBytes,
-                  };
-
-                  console.log(
-                    `Progress gönderiliyor:`,
-                    JSON.stringify(progressData)
-                  );
-                  mainWindow.webContents.send(
-                    "download-progress",
-                    progressData
-                  );
-
-                  // Debug: Konsola ilerleme bilgisini yazdır
-                  if (progress % 10 === 0 || progress === 100) {
-                    console.log(
-                      `İndirme ilerleme: ${fileName}, %${progress} (${receivedBytes}/${totalBytes} bayt)`
-                    );
-                  }
-                } catch (err) {
-                  console.error("İlerleme gönderme hatası:", err);
-                }
-              } else {
-                // Toplam boyut bilinmiyorsa sadece alınan bayt sayısını gönder
-                try {
-                  console.log(
-                    `Belirsiz ilerleme. Alınan: ${receivedBytes} bayt`
-                  );
-                  mainWindow.webContents.send("download-progress", {
-                    id: fileName,
-                    progress: 0, // Belirsiz ilerleme
-                    received: receivedBytes,
-                    total: 0,
-                  });
-                } catch (err) {
-                  console.error("İlerleme gönderme hatası:", err);
-                }
-              }
-            });
-
-            // Yanıtı dosyaya yaz
-            response.pipe(file);
-
-            // İndirme tamamlandığında işlenecek kod
-            let isFinishHandled = false; // Finish olayının sadece bir kez işlenmesini sağlamak için
-
-            // Önerilen bir uzantı varsa ve mevcut uzantıdan farklıysa
-            if (
-              suggestedExtension &&
-              suggestedExtension !== path.extname(fileName)
-            ) {
-              console.log(
-                `MIME türüne göre önerilen uzantı: ${suggestedExtension}, mevcut uzantı: ${path.extname(
-                  fileName
-                )}`
-              );
-
-              // Mevcut uzantı yoksa veya "bilinmeyen" bir uzantıysa veya .ts ise ve MIME türünden bir uzantı önerildiyse
-              const currentExt = path.extname(fileName);
-              if (
-                !currentExt ||
-                currentExt === ".bin" ||
-                currentExt === ".dat" ||
-                currentExt === ".ts"
-              ) {
-                // Dosyayı doğru uzantıyla yeniden adlandır
-                const newFileName = baseFileName + suggestedExtension;
-                const newFilePath = path.join(downloadDir, newFileName);
-
-                // Dosya yazma işlemi devam ettiği için, mevcut dosya yolunu devam ettir
-                // ama işlem bitince yeniden adlandır
-                console.log(
-                  `Dosya uzantısı değiştirilecek: ${fileName} -> ${newFileName}`
+              // Maximum yönlendirme sayısı kontrolü
+              if (redirectCount >= maxRedirects) {
+                throw new Error(
+                  `Çok fazla yönlendirme (maksimum ${maxRedirects})`
                 );
-
-                // İşlem sonunda yeniden adlandırmak için bilgiyi sakla
-                const originalFilePath = filePath;
-                const newFilePathFinal = newFilePath;
-
-                // Dosya bitince yeniden adlandır
-                file.on("finish", () => {
-                  if (isFinishHandled) return;
-                  isFinishHandled = true;
-
-                  file.close();
-
-                  try {
-                    // Dosyayı yeni uzantıyla yeniden adlandır
-                    fs.renameSync(originalFilePath, newFilePathFinal);
-                    console.log(
-                      `Dosya yeniden adlandırıldı: ${originalFilePath} -> ${newFilePathFinal}`
-                    );
-
-                    // Başarılı indirme sonucu döndür
-                    if (
-                      fs.existsSync(newFilePathFinal) &&
-                      fs.statSync(newFilePathFinal).size > 0
-                    ) {
-                      resolve({
-                        success: true,
-                        filePath: newFilePathFinal,
-                        fileSize: receivedBytes,
-                      });
-                    } else {
-                      const error = "Dosya oluşturulamadı veya boş";
-                      console.error(error);
-                      try {
-                        fs.unlinkSync(newFilePathFinal);
-                      } catch {}
-                      reject({ success: false, error });
-                    }
-                  } catch (renameErr) {
-                    console.error(
-                      `Dosya yeniden adlandırma hatası: ${renameErr.message}`
-                    );
-
-                    // Hata durumunda da orijinal dosyayı kontrol et
-                    if (
-                      fs.existsSync(originalFilePath) &&
-                      fs.statSync(originalFilePath).size > 0
-                    ) {
-                      resolve({
-                        success: true,
-                        filePath: originalFilePath,
-                        fileSize: receivedBytes,
-                      });
-                    } else {
-                      const error = `Dosya işleme hatası: ${renameErr.message}`;
-                      console.error(error);
-                      try {
-                        fs.unlinkSync(originalFilePath);
-                      } catch {}
-                      reject({ success: false, error });
-                    }
-                  }
-                });
               }
+
+              continue;
             }
 
-            // Standart finish olayı (eğer özel bir durum belirtilmediyse)
-            file.on("finish", () => {
-              if (isFinishHandled) return;
-              isFinishHandled = true;
+            // Başarısız durum kodu kontrolü
+            if (response.statusCode !== 200) {
+              throw new Error(`HTTP Hata Kodu: ${response.statusCode}`);
+            }
 
-              file.close();
+            // Başarılı yanıt
+            finalResponse = response;
+          } catch (redirectError) {
+            console.error("Yönlendirme hatası:", redirectError.message);
+            throw redirectError;
+          }
+        }
+
+        if (!finalResponse) {
+          throw new Error("Geçerli bir HTTP yanıtı alınamadı");
+        }
+
+        // Dosya akışını oluşturalım
+        const fileStream = fs.createWriteStream(filePath);
+
+        // İlerleme takibi için değişkenler
+        receivedBytes = 0;
+        totalBytes = parseInt(finalResponse.headers["content-length"] || "0");
+        lastProgressUpdateTime = Date.now();
+
+        // Zorunlu ilerleme güncellemelerini başlat
+        startForceProgressUpdates();
+
+        // İlerleme olayını dinle
+        finalResponse.on("data", (chunk) => {
+          receivedBytes += chunk.length;
+          const progress = totalBytes ? receivedBytes / totalBytes : 0;
+          const now = Date.now();
+
+          // Her 500ms'de bir veya indirilen veri 100KB'dan fazlaysa güncelleme gönder
+          const timeDiff = now - lastProgressUpdateTime;
+          const byteDiff = receivedBytes - lastReceivedBytes;
+
+          if (timeDiff > 500 || byteDiff > 102400) {
+            // İlerleme bilgisini güncelle
+            try {
+              mainWindow.webContents.send("download-progress", {
+                id: fileName,
+                progress: progress,
+                received: receivedBytes,
+                total: totalBytes,
+              });
+
+              // Log dosya bilgileri ve ilerleme
               console.log(
-                `İndirme tamamlandı: ${fileName}, Boyut: ${receivedBytes} bayt`
+                `İlerleme: ${fileName}, ${Math.round(
+                  progress * 100
+                )}%, ${receivedBytes}/${totalBytes} bayt`
               );
 
-              // Dosyanın gerçekten oluşturulduğunu doğrula
-              if (fs.existsSync(filePath) && fs.statSync(filePath).size > 0) {
-                resolve({
-                  success: true,
-                  filePath,
-                  fileSize: receivedBytes,
-                });
-              } else {
-                const error = "Dosya oluşturulamadı veya boş";
-                console.error(error);
-                try {
-                  fs.unlinkSync(filePath);
-                } catch {}
-                reject({ success: false, error });
-              }
-            });
-
-            response.on("error", (err) => {
-              const error = `Veri alımı hatası: ${err.message}`;
-              console.error(error);
-              file.close();
-              try {
-                fs.unlinkSync(filePath);
-              } catch {}
-              reject({ success: false, error });
-            });
-          });
-
-          request.on("error", (err) => {
-            const error = `İndirme isteği hatası: ${err.message}`;
-            console.error(error);
-            file.close();
-            try {
-              fs.unlinkSync(filePath);
-            } catch {}
-            reject({ success: false, error });
-          });
-
-          // 30 saniye zaman aşımı
-          request.setTimeout(30000, () => {
-            const error = "İndirme zaman aşımına uğradı";
-            console.error(error);
-            request.abort();
-            file.close();
-            try {
-              fs.unlinkSync(filePath);
-            } catch {}
-            reject({ success: false, error });
-          });
-
-          request.end();
-        };
-
-        // İlk isteği başlat
-        handleRequest(url);
-
-        // Dosya hatası dinleyicisi
-        file.on("error", (err) => {
-          const error = `Dosya yazma hatası: ${err.message}`;
-          console.error(error);
-          try {
-            fs.unlinkSync(filePath);
-          } catch {}
-          reject({ success: false, error });
+              // Son güncelleme zamanı ve bayt sayısını güncelle
+              lastProgressUpdateTime = now;
+              lastReceivedBytes = receivedBytes;
+              lastProgressValue = progress;
+            } catch (sendError) {
+              console.error(
+                "İlerleme bilgisi gönderme hatası:",
+                sendError.message
+              );
+            }
+          }
         });
-      }).catch((error) => {
-        console.error("İndirme promise hatası:", error);
-        // Hata nesnesi mi yoksa string mi kontrolü
-        if (typeof error === "object") {
-          return error; // Zaten uygun formatta ise
+
+        // Dosya akışı için hata ve sonlandırma olaylarını dinle
+        fileStream.on("error", (err) => {
+          console.error("Dosya yazma hatası:", err.message);
+          stopForceProgressUpdates();
+          throw err;
+        });
+
+        await new Promise((resolve, reject) => {
+          finalResponse.pipe(fileStream);
+
+          // Dosya akışı sonlandığında
+          fileStream.on("finish", () => {
+            stopForceProgressUpdates();
+            fileSize = fs.statSync(filePath).size;
+            console.log(`İndirme tamamlandı: ${filePath} (${fileSize} bytes)`);
+
+            // Son bir ilerleme güncellemesi gönder (%100)
+            try {
+              mainWindow.webContents.send("download-progress", {
+                id: fileName,
+                progress: 1, // %100
+                received: fileSize,
+                total: fileSize,
+                completed: true,
+              });
+            } catch (sendError) {
+              console.error(
+                "Son ilerleme bilgisi gönderme hatası:",
+                sendError.message
+              );
+            }
+
+            success = true;
+            resolve();
+          });
+
+          // Hata olayını dinle
+          fileStream.on("error", (err) => {
+            stopForceProgressUpdates();
+            reject(err);
+          });
+
+          finalResponse.on("error", (err) => {
+            stopForceProgressUpdates();
+            reject(err);
+          });
+        });
+
+        // İndirme başarılı - döngüden çık
+        break;
+      } catch (error) {
+        console.error(
+          `İndirme hatası (deneme ${retryCount + 1}/${maxRetries}):`,
+          error.message
+        );
+        stopForceProgressUpdates();
+        responseError = error;
+        retryCount++;
+
+        // Eğer dosya varsa ve hata olmuşsa, tamamlanmamış dosyayı silelim
+        try {
+          if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+            console.log(`Tamamlanmamış dosya silindi: ${filePath}`);
+          }
+        } catch (unlinkError) {
+          console.error("Dosya silme hatası:", unlinkError.message);
         }
-        return { success: false, error: String(error) };
-      });
-    } catch (error) {
-      console.error(`İndirme genel hatası:`, error);
+
+        // Son deneme değilse, yeniden deneyelim
+        if (retryCount < maxRetries) {
+          console.log(`Tekrar deneniyor (${retryCount}/${maxRetries})...`);
+        }
+      }
+    }
+
+    // İndirme sonucu
+    if (success) {
+      // İndirilen dosyaları kaydet
+      if (streamInfo) {
+        logDownloadedStream({
+          ...streamInfo,
+          filePath,
+          fileSize,
+          timestamp: Date.now(),
+        });
+      }
+
+      // İndirme başarılı olduğu için aktif indirmelerden çıkar
+      global.activeDownloads.delete(filePath);
+
+      return { success: true, filePath, fileSize };
+    } else {
+      // Başarısız indirmeyi de listeden çıkar
+      global.activeDownloads.delete(filePath);
+      throw responseError || new Error("İndirme başarısız oldu");
+    }
+  } catch (error) {
+    // Hata durumunda da listeden çıkar
+    if (filePath) {
+      global.activeDownloads.delete(filePath);
+    }
+
+    console.error(`İndirme hatası (${fileName}):`, error);
+    return {
+      success: false,
+      error: error.message || "Bilinmeyen indirme hatası",
+    };
+  }
+}
+
+// İndirilen stream'leri loglama
+function logDownloadedStream(streamInfo) {
+  try {
+    const userDataPath = app.getPath("userData");
+    const logDir = path.join(userDataPath, "logs");
+
+    // Log dizini yoksa oluştur
+    if (!fs.existsSync(logDir)) {
+      fs.mkdirSync(logDir, { recursive: true });
+    }
+
+    // Tarih bazlı log dosyası adı oluştur (YYYY-MM.log formatında)
+    const now = new Date();
+    const logFileName = `downloads_${now.getFullYear()}-${String(
+      now.getMonth() + 1
+    ).padStart(2, "0")}.log`;
+    const logFilePath = path.join(logDir, logFileName);
+
+    // Log kaydını oluştur
+    const logEntry = {
+      streamId: streamInfo.id,
+      title: streamInfo.title,
+      url: streamInfo.url,
+      filePath: streamInfo.filePath,
+      fileSize: streamInfo.fileSize,
+      downloadedAt: new Date().toISOString(),
+      deviceId: global.deviceId,
+    };
+
+    // Log dosyasına ekle (her satır bir JSON objesi)
+    fs.appendFileSync(logFilePath, JSON.stringify(logEntry) + "\n", "utf8");
+
+    console.log(`Log kaydı oluşturuldu: ${logFilePath}`);
+
+    // Toplam indirme sayısını da güncelle
+    updateDownloadStats(streamInfo);
+
+    return true;
+  } catch (error) {
+    console.error("Log oluşturma hatası:", error);
+    return false;
+  }
+}
+
+// İndirme istatistiklerini güncelle
+function updateDownloadStats(streamInfo) {
+  try {
+    const userDataPath = app.getPath("userData");
+    const statsFilePath = path.join(userDataPath, "download_stats.json");
+
+    // Mevcut istatistikleri oku veya yeni oluştur
+    let stats = {};
+    if (fs.existsSync(statsFilePath)) {
+      stats = JSON.parse(fs.readFileSync(statsFilePath, "utf8"));
+    }
+
+    // İstatistikleri güncelle
+    stats.deviceId = global.deviceId;
+    stats.totalDownloads = (stats.totalDownloads || 0) + 1;
+    stats.totalBytes = (stats.totalBytes || 0) + (streamInfo.fileSize || 0);
+    stats.lastDownloadDate = new Date().toISOString();
+
+    // Aylık istatistikler
+    const yearMonth = `${new Date().getFullYear()}-${String(
+      new Date().getMonth() + 1
+    ).padStart(2, "0")}`;
+    if (!stats.monthly) stats.monthly = {};
+    if (!stats.monthly[yearMonth])
+      stats.monthly[yearMonth] = { count: 0, bytes: 0 };
+
+    stats.monthly[yearMonth].count += 1;
+    stats.monthly[yearMonth].bytes += streamInfo.fileSize || 0;
+
+    // İstatistikleri kaydet
+    fs.writeFileSync(statsFilePath, JSON.stringify(stats, null, 2), "utf8");
+
+    console.log("İndirme istatistikleri güncellendi");
+  } catch (error) {
+    console.error("İstatistik güncelleme hatası:", error);
+  }
+}
+
+// İndirme loglarını alma (son 50 indirme)
+ipcMain.handle("get-download-logs", async () => {
+  console.log("get-download-logs isteği alındı");
+  try {
+    const userDataPath = app.getPath("userData");
+    const logDir = path.join(userDataPath, "logs");
+
+    if (!fs.existsSync(logDir)) {
+      return [];
+    }
+
+    // Tüm log dosyalarını bul ve en yeniden eskiye sırala
+    const logFiles = fs
+      .readdirSync(logDir)
+      .filter((file) => file.startsWith("downloads_") && file.endsWith(".log"))
+      .sort()
+      .reverse();
+
+    const logs = [];
+
+    // En son 50 kaydı almak için dosyaları oku
+    for (const logFile of logFiles) {
+      const filePath = path.join(logDir, logFile);
+      const content = fs.readFileSync(filePath, "utf8");
+
+      const entries = content
+        .split("\n")
+        .filter((line) => line.trim())
+        .map((line) => {
+          try {
+            return JSON.parse(line);
+          } catch (e) {
+            console.error("Log satırı ayrıştırılamadı:", line);
+            return null;
+          }
+        })
+        .filter((entry) => entry !== null);
+
+      logs.push(...entries);
+
+      // En son 50 log kaydıyla sınırla
+      if (logs.length >= 50) {
+        break;
+      }
+    }
+
+    // Son 50 kayıt ile sınırla ve tarihe göre sırala
+    return logs.slice(0, 50).sort((a, b) => {
+      const dateA = new Date(a.downloadedAt);
+      const dateB = new Date(b.downloadedAt);
+      return dateB - dateA; // Yeniden eskiye sırala
+    });
+  } catch (error) {
+    console.error("İndirme logları alınırken hata:", error);
+    return [];
+  }
+});
+
+// İndirme istatistiklerini alma
+ipcMain.handle("get-download-stats", async () => {
+  console.log("get-download-stats isteği alındı");
+  try {
+    const userDataPath = app.getPath("userData");
+    const statsFilePath = path.join(userDataPath, "download_stats.json");
+
+    if (!fs.existsSync(statsFilePath)) {
       return {
-        success: false,
-        error:
-          typeof error === "string"
-            ? error
-            : error.message || JSON.stringify(error),
+        deviceId: global.deviceId,
+        totalDownloads: 0,
+        totalBytes: 0,
+        monthly: {},
+      };
+    }
+
+    const stats = JSON.parse(fs.readFileSync(statsFilePath, "utf8"));
+    return stats;
+  } catch (error) {
+    console.error("İndirme istatistikleri alınırken hata:", error);
+    return {
+      deviceId: global.deviceId,
+      totalDownloads: 0,
+      totalBytes: 0,
+      monthly: {},
+      error: error.message,
+    };
+  }
+});
+
+// Dosya varlığını ve boyutunu kontrol et
+ipcMain.handle(
+  "check-file-exists",
+  async (event, { filePath, expectedSize }) => {
+    try {
+      console.log(`check-file-exists isteği alındı: ${filePath}`);
+      console.log(`Beklenen boyut: ${expectedSize || "belirsiz"}`);
+
+      if (!filePath || typeof filePath !== "string") {
+        return { exists: false, reason: "Geçersiz dosya yolu" };
+      }
+
+      // Dosya var mı kontrol et
+      if (!fs.existsSync(filePath)) {
+        return { exists: false, reason: "Dosya bulunamadı" };
+      }
+
+      // Dosya stat bilgilerini al
+      const stats = fs.statSync(filePath);
+
+      // Eğer beklenen boyut belirtilmişse ve dosya boyutu eşleşmiyorsa
+      if (expectedSize && stats.size !== expectedSize) {
+        return {
+          exists: true,
+          match: false,
+          fileSize: stats.size,
+          reason: `Dosya boyutu eşleşmiyor (Mevcut: ${stats.size}, Beklenen: ${expectedSize})`,
+        };
+      }
+
+      // Dosya var ve boyut kontrolü başarılı
+      return {
+        exists: true,
+        match: true,
+        fileSize: stats.size,
+        lastModified: stats.mtime.toISOString(),
+        reason: "Dosya mevcut ve boyut uyumlu",
+      };
+    } catch (error) {
+      console.error("Dosya kontrolü hatası:", error);
+      return {
+        exists: false,
+        error: error.message,
+        reason: "Dosya kontrolü sırasında hata oluştu",
       };
     }
   }
 );
+
+// Log oluşturma API'si (React tarafından çağrılabilir)
+ipcMain.handle("log-downloaded-stream", async (event, streamInfo) => {
+  try {
+    console.log(`log-downloaded-stream isteği alındı:`, streamInfo);
+
+    if (!streamInfo || typeof streamInfo !== "object") {
+      console.error("Geçersiz stream bilgisi:", streamInfo);
+      return { success: false, error: "Geçersiz stream bilgisi" };
+    }
+
+    // Log oluştur
+    const result = logDownloadedStream(streamInfo);
+
+    return { success: result };
+  } catch (error) {
+    console.error("Log oluşturma hatası:", error);
+    return { success: false, error: error.message };
+  }
+});

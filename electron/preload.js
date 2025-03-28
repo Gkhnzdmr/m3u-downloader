@@ -11,14 +11,13 @@ let progressListeners = {};
 ipcRenderer.on("download-progress", (event, data) => {
   // Debug: Konsola ilerleme
   console.log(`
-==== PRELOAD: İLERLEME ALINDI ====
-ID: ${data.id}
-Progress: %${data.progress || 0}
-Received: ${data.received || 0} bayt
-Total: ${data.total || 0} bayt
-================================
-`);
-
+    ==== PRELOAD: İLERLEME ALINDI ====
+    ID: ${data.id}
+    Progress: %${data.progress || 0}
+    Received: ${data.received || 0} bayt
+    Total: ${data.total || 0} bayt
+    ================================
+    `);
   // Kayıtlı tüm dinleyicileri çağır
   if (progressListeners[data.id]) {
     console.log(
@@ -179,6 +178,22 @@ contextBridge.exposeInMainWorld("electronAPI", {
     extname: (filePath) => path.extname(filePath),
     dirname: (filePath) => path.dirname(filePath),
   },
+  saveDownloadedFiles: (downloadedFiles) =>
+    ipcRenderer.invoke("save-downloaded-files", downloadedFiles),
+  getDownloadedFiles: () => ipcRenderer.invoke("get-downloaded-files"),
+
+  // İndirme loglarını alma (son 50 indirme)
+  getDownloadLogs: () => ipcRenderer.invoke("get-download-logs"),
+
+  // İndirme istatistiklerini alma
+  getDownloadStats: () => ipcRenderer.invoke("get-download-stats"),
+
+  // Dosya varlığını ve boyutunu kontrol et
+  checkFileExists: (params) => ipcRenderer.invoke("check-file-exists", params),
+
+  // İndirme loglarını oluştur
+  logDownloadedStream: (streamInfo) =>
+    ipcRenderer.invoke("log-downloaded-stream", streamInfo),
 });
 
 // Node.js API'lerini direkt olarak erişilebilir yap
@@ -208,6 +223,9 @@ contextBridge.exposeInMainWorld("nodeBridge", {
   },
   path: {
     join: (...args) => path.join(...args),
+  },
+  process: {
+    platform: process.platform,
   },
 });
 

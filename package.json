@@ -1,5 +1,6 @@
 {
-  "name": "m3u-downloader-react",
+  "name": "m3u-downloader",
+  "productName": "M3U Downloader",
   "version": "1.0.0",
   "main": "electron/main.js",
   "scripts": {
@@ -13,12 +14,28 @@
   "author": "",
   "license": "ISC",
   "description": "",
+  "build": {
+    "appId": "com.m3u.downloader",
+    "productName": "M3U Downloader",
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "identity": null,
+      "darkModeSupport": true,
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "category": "public.app-category.utilities"
+    }
+  },
   "dependencies": {
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.0",
     "@mui/icons-material": "^7.0.0",
     "@mui/material": "^7.0.0",
-    "electron": "^35.1.2",
     "electron-json-storage": "^4.6.0",
     "electron-squirrel-startup": "^1.0.1",
     "react": "^19.0.0",
@@ -37,6 +54,7 @@
     "babel-loader": "^10.0.0",
     "concurrently": "^8.2.2",
     "css-loader": "^7.1.2",
+    "electron": "^35.1.2",
     "electron-forge": "^5.2.4",
     "html-webpack-plugin": "^5.6.3",
     "style-loader": "^4.0.0",
