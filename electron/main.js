@@ -133,6 +133,14 @@ function cleanupDownloads() {
     console.log("Yarım kalan indirmeler temizleniyor...");
     if (global.activeDownloads.size === 0) {
       console.log("Aktif indirme bulunmuyor.");
+      // GUI'ye bilgi gönder
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("downloads-cleanup", {
+          status: "success",
+          message: "Temizlenecek aktif indirme bulunmuyor.",
+          count: 0,
+        });
+      }
       return;
     }
 
@@ -140,24 +148,63 @@ function cleanupDownloads() {
       `${global.activeDownloads.size} adet yarım kalan indirme temizlenecek.`
     );
 
+    // Silinen dosyaların listesi
+    const cleanedFiles = [];
+
     // Tüm aktif indirmelerin dosyalarını silme
     for (const [filePath, fileInfo] of global.activeDownloads.entries()) {
       try {
         if (fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);
+          cleanedFiles.push({
+            path: filePath,
+            fileName: fileInfo.fileName,
+            success: true,
+          });
           console.log(`Yarım kalan dosya silindi: ${filePath}`);
         } else {
+          cleanedFiles.push({
+            path: filePath,
+            fileName: fileInfo.fileName,
+            success: false,
+            reason: "not_found",
+          });
           console.log(`Dosya zaten silinmiş: ${filePath}`);
         }
       } catch (error) {
+        cleanedFiles.push({
+          path: filePath,
+          fileName: fileInfo.fileName,
+          success: false,
+          reason: "error",
+          error: error.message,
+        });
         console.error(`Dosya silme hatası (${filePath}):`, error.message);
       }
+    }
+
+    // GUI'ye temizleme sonuçlarını bildir
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("downloads-cleanup", {
+        status: "success",
+        message: `${global.activeDownloads.size} adet yarım kalan indirme temizlendi.`,
+        count: global.activeDownloads.size,
+        files: cleanedFiles,
+      });
     }
 
     // Listeyi temizle
     global.activeDownloads.clear();
   } catch (error) {
     console.error("Temizleme hatası:", error);
+    // GUI'ye hata bildir
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("downloads-cleanup", {
+        status: "error",
+        message: "Temizleme sırasında hata oluştu: " + error.message,
+        error: error.message,
+      });
+    }
   }
 }
 
@@ -402,18 +449,18 @@ async function downloadSingleStream(
         clearInterval(forceUpdateTimer);
       }
 
-      // Her 2 saniyede bir ilerleme güncellemesi gönder
+      // Her 1 saniyede bir ilerleme güncellemesi gönder
       forceUpdateTimer = setInterval(() => {
         // Son güncellemeden bu yana geçen süre
         const timeSinceLastUpdate = Date.now() - lastProgressUpdateTime;
 
-        // Eğer 2 saniyeden fazla süre geçtiyse ve indirme devam ediyorsa zorla güncelleme gönder
-        if (timeSinceLastUpdate > 2000 && receivedBytes > 0) {
+        // Eğer 1 saniyeden fazla süre geçtiyse ve indirme devam ediyorsa zorla güncelleme gönder
+        if (timeSinceLastUpdate > 1000 && receivedBytes > 0) {
           console.log("Zorla ilerleme güncellemesi gönderiliyor...");
           const progress = totalBytes ? receivedBytes / totalBytes : 0;
 
           // İlerleme durumunu sadece bir kez gönder
-          if (progress !== lastProgressValue) {
+          if (progress !== lastProgressValue || timeSinceLastUpdate > 3000) {
             lastProgressValue = progress;
             // İlerleme bilgisini güncelle
             try {
@@ -435,7 +482,7 @@ async function downloadSingleStream(
             lastProgressUpdateTime = Date.now();
           }
         }
-      }, 2000);
+      }, 1000); // 1 saniye
     };
 
     // İndirme bittiğinde timer'ı temizle
@@ -600,15 +647,16 @@ async function downloadSingleStream(
 
         // İlerleme olayını dinle
         finalResponse.on("data", (chunk) => {
+          // Veri alındıkça ilerleme bilgisini güncelle
           receivedBytes += chunk.length;
-          const progress = totalBytes ? receivedBytes / totalBytes : 0;
           const now = Date.now();
-
-          // Her 500ms'de bir veya indirilen veri 100KB'dan fazlaysa güncelleme gönder
+          const progress = totalBytes ? receivedBytes / totalBytes : 0;
           const timeDiff = now - lastProgressUpdateTime;
           const byteDiff = receivedBytes - lastReceivedBytes;
 
-          if (timeDiff > 500 || byteDiff > 102400) {
+          // İlerleme bilgisini düzenli aralıklarla güncelle
+          // 200 ms veya 51200 bayt (50 KB) değişim olduğunda
+          if (timeDiff > 200 || byteDiff > 51200) {
             // İlerleme bilgisini güncelle
             try {
               mainWindow.webContents.send("download-progress", {

@@ -6,6 +6,8 @@ console.log("Preload script çalıştırılıyor...");
 
 // İlerleme olayı için dinleyiciler
 let progressListeners = {};
+// İndirme temizleme olayları için dinleyiciler
+let cleanupListeners = [];
 
 // İndirme ilerleme durumunu dinle
 ipcRenderer.on("download-progress", (event, data) => {
@@ -50,6 +52,27 @@ ipcRenderer.on("download-progress", (event, data) => {
     });
   } else {
     console.log(`"all" için kayıtlı dinleyici yok`);
+  }
+});
+
+// İndirme temizleme olayını dinle
+ipcRenderer.on("downloads-cleanup", (event, data) => {
+  console.log("İndirme temizleme olayı alındı:", data);
+
+  // Kayıtlı tüm dinleyicileri çağır
+  if (cleanupListeners.length > 0) {
+    console.log(
+      `${cleanupListeners.length} adet temizleme dinleyicisine bilgi gönderiliyor`
+    );
+    cleanupListeners.forEach((listener) => {
+      try {
+        listener(data);
+      } catch (err) {
+        console.error(`Temizleme dinleyici hatası:`, err);
+      }
+    });
+  } else {
+    console.log(`Temizleme için kayıtlı dinleyici yok`);
   }
 });
 
@@ -194,6 +217,18 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // İndirme loglarını oluştur
   logDownloadedStream: (streamInfo) =>
     ipcRenderer.invoke("log-downloaded-stream", streamInfo),
+
+  // İndirme temizleme olayını dinle
+  onDownloadsCleanup: (listener) => {
+    console.log("İndirme temizleme dinleyicisi eklendi");
+    cleanupListeners.push(listener);
+
+    // Temizleme fonksiyonu döndür
+    return () => {
+      console.log("İndirme temizleme dinleyicisi kaldırıldı");
+      cleanupListeners = cleanupListeners.filter((l) => l !== listener);
+    };
+  },
 });
 
 // Node.js API'lerini direkt olarak erişilebilir yap
