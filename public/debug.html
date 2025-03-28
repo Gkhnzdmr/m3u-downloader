@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="tr">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Electron API Test</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+            margin: 20px;
+            line-height: 1.6;
+        }
+
+        button {
+            padding: 8px 16px;
+            margin: 5px;
+            cursor: pointer;
+        }
+
+        pre {
+            background-color: #f0f0f0;
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Electron API Test</h1>
+    <div>
+        <button onclick="testElectronAPI()">ElectronAPI Testi</button>
+        <button onclick="testNodeBridge()">NodeBridge Testi</button>
+    </div>
+    <h2>Sonuçlar:</h2>
+    <pre id="results"></pre>
+
+    <script>
+        const resultsElement = document.getElementById('results');
+
+        // ElectronAPI testleri
+        function testElectronAPI() {
+            resultsElement.textContent = 'ElectronAPI test ediliyor...\n';
+
+            // window.electronAPI var mı?
+            const hasElectronAPI = window.hasOwnProperty('electronAPI');
+            resultsElement.textContent += `ElectronAPI mevcut mu: ${hasElectronAPI}\n`;
+
+            if (hasElectronAPI) {
+                // ElectronAPI'nin içeriğini listele
+                const methods = Object.getOwnPropertyNames(window.electronAPI);
+                resultsElement.textContent += `\nMevcut metodlar: ${methods.join(', ')}\n\n`;
+
+                // Her metodun türünü göster
+                methods.forEach(method => {
+                    resultsElement.textContent += `${method}: ${typeof window.electronAPI[method]}\n`;
+                });
+            }
+        }
+
+        // NodeBridge testleri
+        function testNodeBridge() {
+            resultsElement.textContent = 'NodeBridge test ediliyor...\n';
+
+            // window.nodeBridge var mı?
+            const hasNodeBridge = window.hasOwnProperty('nodeBridge');
+            resultsElement.textContent += `NodeBridge mevcut mu: ${hasNodeBridge}\n`;
+
+            if (hasNodeBridge) {
+                // NodeBridge'in içeriğini listele
+                const properties = Object.getOwnPropertyNames(window.nodeBridge);
+                resultsElement.textContent += `\nMevcut özellikler: ${properties.join(', ')}\n\n`;
+
+                // Her özelliğin türünü göster
+                properties.forEach(prop => {
+                    resultsElement.textContent += `${prop}: ${typeof window.nodeBridge[prop]}\n`;
+
+                    // Alt özellikler varsa onları da göster
+                    if (typeof window.nodeBridge[prop] === 'object' && window.nodeBridge[prop] !== null) {
+                        const subProps = Object.getOwnPropertyNames(window.nodeBridge[prop]);
+                        subProps.forEach(subProp => {
+                            resultsElement.textContent += `  - ${subProp}: ${typeof window.nodeBridge[prop][subProp]}\n`;
+                        });
+                    }
+                });
+            }
+        }
+
+        // Sayfa yüklendiğinde otomatik olarak ElectronAPI testini çalıştır
+        window.onload = testElectronAPI;
+    </script>
+</body>
+
+</html>
