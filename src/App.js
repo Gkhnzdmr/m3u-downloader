@@ -816,8 +816,18 @@ function App() {
 
   const handleSelectAll = (event) => {
     const checked = event.target.checked;
+
+    // Filtrelenmiş ID'leri al
+    const filteredIds = searchQuery
+      ? filteredStreams.map((stream) => stream.id)
+      : streams.map((stream) => stream.id);
+
+    // Tüm stream'leri güncelle, sadece filtrelenmiş ID'lerdeki seçim değişecek
     setStreams((prevStreams) =>
-      prevStreams.map((stream) => ({ ...stream, selected: checked }))
+      prevStreams.map((stream) => ({
+        ...stream,
+        selected: filteredIds.includes(stream.id) ? checked : stream.selected,
+      }))
     );
   };
 
@@ -926,6 +936,15 @@ function App() {
         // Tüm indirme işlemleri tamamlandığında
         console.log("Tüm dosyalar indirildi, toplu indirme tamamlandı.");
         setBatchDownloading(false);
+
+        // Tüm seçili stream'lerin checkbox'larını kaldır
+        setStreams((prevStreams) =>
+          prevStreams.map((stream) => ({
+            ...stream,
+            selected: false,
+          }))
+        );
+
         setNotification({
           open: true,
           message: "Tüm seçili stream'lerin indirme işlemi tamamlandı.",
