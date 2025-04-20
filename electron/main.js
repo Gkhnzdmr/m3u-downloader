@@ -261,6 +261,100 @@ ipcMain.handle("select-m3u-file", async () => {
   }
 });
 
+// URL'den M3U dosyası yükleme
+ipcMain.handle("load-m3u-from-url", async (event, url) => {
+  console.log("load-m3u-from-url isteği alındı:", url);
+  
+  try {
+    if (!url) {
+      throw new Error("URL boş olamaz");
+    }
+    
+    if (typeof url !== 'string') {
+      throw new Error("URL bir string olmalıdır");
+    }
+
+    const fetchResponse = await fetchFromUrl(url);
+    
+    // URL'yi saklama
+    storage.set("lastM3uUrl", url, (error) => {
+      if (error) console.error("M3U URL'si kaydedilemedi", error);
+    });
+    
+    return { content: fetchResponse };
+  } catch (error) {
+    console.error("URL'den M3U yükleme hatası:", error);
+    throw error;
+  }
+});
+
+// URL'den içerik indirme yardımcı fonksiyonu
+async function fetchFromUrl(url) {
+  return new Promise((resolve, reject) => {
+    console.log("URL'den içerik indiriliyor:", url);
+    
+    if (!url || typeof url !== 'string') {
+      return reject(new Error("Geçersiz URL formatı: URL bir string olmalıdır"));
+    }
+    
+    // URL formatı kontrolü
+    try {
+      new URL(url);
+    } catch (error) {
+      return reject(new Error("Geçersiz URL formatı: " + error.message));
+    }
+    
+    const httpModule = url.startsWith('https:') ? https : http;
+    
+    const request = httpModule.get(url, (response) => {
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return reject(new Error(`HTTP hata kodu: ${response.statusCode}`));
+      }
+      
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8');
+        resolve(body);
+      });
+    });
+    
+    request.on('error', (error) => {
+      reject(error);
+    });
+    
+    request.end();
+  });
+}
+
+// M3U URL'sini ve otomatik güncelleme ayarını kaydetme
+ipcMain.handle("save-m3u-url", async (event, url, autoUpdate) => {
+  console.log("save-m3u-url isteği alındı:", url, "autoUpdate:", autoUpdate);
+  
+  try {
+    // URL'yi sakla
+    await new Promise((resolve, reject) => {
+      storage.set("lastM3uUrl", url, (error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+    
+    // Otomatik güncelleme ayarını sakla
+    await new Promise((resolve, reject) => {
+      storage.set("autoUpdateM3u", autoUpdate, (error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+    
+    return { success: true };
+  } catch (error) {
+    console.error("M3U URL'si ve ayarları kaydedilemedi:", error);
+    throw error;
+  }
+});
+
 // Kayıt klasörü seçme işlemi
 ipcMain.handle("select-download-folder", async () => {
   try {
@@ -292,15 +386,49 @@ ipcMain.handle("select-download-folder", async () => {
 ipcMain.handle("get-saved-paths", async () => {
   console.log("get-saved-paths isteği alındı");
   return new Promise((resolve) => {
-    storage.getMany(["lastM3uPath", "lastDownloadDir"], (error, data) => {
+    storage.getMany(["lastM3uPath", "lastDownloadDir", "lastM3uUrl", "autoUpdateM3u"], (error, data) => {
       if (error) {
         console.error("Kaydedilmiş yollar alınamadı", error);
-        resolve({ lastM3uPath: null, lastDownloadDir: null });
+        resolve({ lastM3uPath: null, lastDownloadDir: null, lastM3uUrl: null, autoUpdateM3u: true });
       } else {
         console.log("Kaydedilmiş yollar alındı:", data);
         resolve(data);
       }
     });
+  });
+});
+
+// M3U bilgilerini sıfırlama
+ipcMain.handle("reset-m3u-data", async () => {
+  console.log("reset-m3u-data isteği alındı");
+  return new Promise((resolve) => {
+    // Silinecek M3U ile ilgili alanlar
+    const keysToRemove = ["lastM3uPath", "lastM3uUrl", "autoUpdateM3u"];
+    
+    // Çoklu silme işlemi
+    const removePromises = keysToRemove.map(key => {
+      return new Promise((resolveRemove) => {
+        storage.remove(key, (error) => {
+          if (error) {
+            console.error(`${key} silinemedi:`, error);
+          } else {
+            console.log(`${key} başarıyla silindi`);
+          }
+          resolveRemove();
+        });
+      });
+    });
+    
+    // Tüm silme işlemlerinin tamamlanmasını bekle
+    Promise.all(removePromises)
+      .then(() => {
+        console.log("M3U bilgileri başarıyla sıfırlandı");
+        resolve({ success: true });
+      })
+      .catch((error) => {
+        console.error("M3U bilgileri sıfırlanırken hata:", error);
+        resolve({ success: false, error: error.message });
+      });
   });
 });
 

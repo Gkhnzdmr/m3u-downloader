@@ -105,6 +105,33 @@ contextBridge.exposeInMainWorld("electronAPI", {
       throw error;
     }
   },
+  loadM3uFromUrl: async (url) => {
+    console.log("electronAPI.loadM3uFromUrl çağrıldı:", url);
+    try {
+      return await ipcRenderer.invoke("load-m3u-from-url", url);
+    } catch (error) {
+      console.error("load-m3u-from-url hatası:", error);
+      throw error;
+    }
+  },
+  saveM3uUrl: async (url, autoUpdate) => {
+    console.log("electronAPI.saveM3uUrl çağrıldı:", url, autoUpdate);
+    try {
+      return await ipcRenderer.invoke("save-m3u-url", url, autoUpdate);
+    } catch (error) {
+      console.error("save-m3u-url hatası:", error);
+      throw error;
+    }
+  },
+  resetM3uData: async () => {
+    console.log("electronAPI.resetM3uData çağrıldı");
+    try {
+      return await ipcRenderer.invoke("reset-m3u-data");
+    } catch (error) {
+      console.error("reset-m3u-data hatası:", error);
+      throw error;
+    }
+  },
   downloadStream: async (params) => {
     console.log("electronAPI.downloadStream çağrıldı", params);
     try {

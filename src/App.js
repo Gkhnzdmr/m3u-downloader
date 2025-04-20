@@ -4,6 +4,9 @@ import FileOpenIcon from "@mui/icons-material/FileOpen";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import SearchIcon from "@mui/icons-material/Search";
+import LinkIcon from "@mui/icons-material/Link";
+import RefreshIcon from "@mui/icons-material/Refresh";
+import DeleteIcon from "@mui/icons-material/Delete";
 import {
   Alert,
   Box,
@@ -26,6 +29,10 @@ import {
   TextField,
   Tooltip,
   Typography,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
 } from "@mui/material";
 import React, { useEffect, useReducer, useRef, useState } from "react";
 import M3uParser from "./utils/m3uParser";
@@ -69,6 +76,14 @@ function App() {
   const [downloadQueue, setDownloadQueue] = useState([]);
   // Toplu indirme işlemi sürüyor mu?
   const [batchDownloading, setBatchDownloading] = useState(false);
+  // M3U URL'si için yeni state
+  const [m3uUrl, setM3uUrl] = useState("");
+  // URL diyalog penceresinin durumu için state
+  const [urlDialogOpen, setUrlDialogOpen] = useState(false);
+  // Geçici URL değişkenini saklamak için state
+  const [tempUrl, setTempUrl] = useState("");
+  // Otomatik güncelleme için state
+  const [autoUpdate, setAutoUpdate] = useState(true);
 
   // İndirme ilerleme durumu için state
   const [downloadProgress, setDownloadProgress] = useState({});
@@ -128,24 +143,40 @@ function App() {
         const paths = await electronAPI.getSavedPaths();
         console.log("Kaydedilmiş yollar:", paths);
 
-        const { lastM3uPath, lastDownloadDir } = paths || {};
+        const { lastM3uPath, lastDownloadDir, lastM3uUrl, autoUpdateM3u } = paths || {};
 
-        if (lastM3uPath) {
-          console.log("Son kullanılan M3U dosya yolu:", lastM3uPath);
-          // Önce state'i güncelle
-          setM3uFilePath(lastM3uPath);
-
-          // String kontrolü yap
-          if (typeof lastM3uPath === "string") {
-            // Dosyayı oku
-            loadM3uFile(lastM3uPath);
-          } else {
-            console.error("lastM3uPath string formatında değil:", lastM3uPath);
-          }
-        }
-
+        // İndirme klasörünü her durumda set et
         if (lastDownloadDir) {
           setDownloadDir(lastDownloadDir);
+        }
+
+        // Önceliğe göre yükleme yap (ya URL, ya da dosya)
+        // İkisinin birlikte çalışmasını önlemek için ayrı ayrı kontrol ediyoruz
+        if (lastM3uUrl && typeof lastM3uUrl === 'string') {
+          console.log("Son kullanılan M3U URL:", lastM3uUrl);
+          setM3uUrl(lastM3uUrl);
+          
+          // M3U dosya yolunu temizle
+          setM3uFilePath("");
+          
+          // Otomatik güncelleme ayarını kontrol et
+          if (autoUpdateM3u !== false) {
+            setAutoUpdate(true);
+            // Uygulama başlangıcında URL'den otomatik yükleme yap
+            setTimeout(() => loadM3uFromUrl(lastM3uUrl), 1000);
+          } else {
+            setAutoUpdate(false);
+          }
+        } else if (lastM3uPath && typeof lastM3uPath === 'string') {
+          console.log("Son kullanılan M3U dosya yolu:", lastM3uPath);
+          // M3U dosya yolunu güncelle
+          setM3uFilePath(lastM3uPath);
+          
+          // URL'yi temizle
+          setM3uUrl("");
+          
+          // Dosyayı yükle
+          loadM3uFile(lastM3uPath);
         }
       } catch (error) {
         console.error("Kaydedilmiş yollar yüklenirken hata:", error);
@@ -165,36 +196,9 @@ function App() {
       setLoading(true);
 
       let fileContent;
-      if (filePath) {
-        // Eğer filePath doğrudan sağlanmışsa, içeriği disk'ten oku
-        try {
-          // Tip kontrolü yap - filePath bir string olmalı
-          if (typeof filePath !== "string") {
-            console.error("Dosya yolu string değil:", filePath);
-
-            // Eğer bir obje ise, path özelliğini kullan
-            if (filePath && typeof filePath === "object" && filePath.path) {
-              filePath = filePath.path;
-              console.log("Düzeltilmiş dosya yolu:", filePath);
-            } else {
-              throw new Error("Geçersiz dosya yolu formatı");
-            }
-          }
-
-          if (nodeBridge && nodeBridge.fs) {
-            // nodeBridge üzerinden oku
-            fileContent = nodeBridge.fs.readFileSync(filePath, "utf8");
-          } else if (electronAPI && electronAPI.readFile) {
-            // electronAPI üzerinden oku
-            fileContent = await electronAPI.readFile(filePath);
-          } else {
-            throw new Error("Dosya okuma API bulunamadı");
-          }
-        } catch (error) {
-          console.error("Dosya okuma hatası:", error);
-          throw error;
-        }
-      } else {
+      let finalPath = filePath;
+      
+      if (!filePath) {
         // Yeni dosya seç
         if (!electronAPI || !electronAPI.selectM3uFile) {
           throw new Error("Dosya seçme API bulunamadı");
@@ -203,8 +207,37 @@ function App() {
         const result = await electronAPI.selectM3uFile();
         if (!result) return;
 
-        setM3uFilePath(result.path);
+        finalPath = result.path;
         fileContent = result.content;
+      } else {
+        // Eğer filePath doğrudan sağlanmışsa, içeriği disk'ten oku
+        try {
+          // Tip kontrolü yap - filePath bir string olmalı
+          if (typeof filePath !== "string") {
+            console.error("Dosya yolu string değil:", filePath);
+
+            // Eğer bir obje ise, path özelliğini kullan
+            if (filePath && typeof filePath === "object" && filePath.path) {
+              finalPath = filePath.path;
+              console.log("Düzeltilmiş dosya yolu:", finalPath);
+            } else {
+              throw new Error("Geçersiz dosya yolu formatı");
+            }
+          }
+
+          if (nodeBridge && nodeBridge.fs) {
+            // nodeBridge üzerinden oku
+            fileContent = nodeBridge.fs.readFileSync(finalPath, "utf8");
+          } else if (electronAPI && electronAPI.readFile) {
+            // electronAPI üzerinden oku
+            fileContent = await electronAPI.readFile(finalPath);
+          } else {
+            throw new Error("Dosya okuma API bulunamadı");
+          }
+        } catch (error) {
+          console.error("Dosya okuma hatası:", error);
+          throw error;
+        }
       }
 
       if (!fileContent) {
@@ -221,6 +254,17 @@ function App() {
 
       // Streams durumunu güncelle
       setStreams(streamsWithSelection);
+      
+      // Dosya yolunu güncelle
+      setM3uFilePath(finalPath);
+      
+      // URL'yi temizle (aynı anda sadece birisi aktif olmalı)
+      setM3uUrl("");
+      
+      // URL'yi backend'de de temizle
+      if (electronAPI && electronAPI.saveM3uUrl) {
+        await electronAPI.saveM3uUrl("", false);
+      }
 
       setNotification({
         open: true,
@@ -1191,8 +1235,145 @@ function App() {
     }
   }, [electronAPI]);
 
+  // URL'den M3U dosyasını yüklemek için yeni fonksiyon
+  const loadM3uFromUrl = async (url) => {
+    if (!url || typeof url !== 'string') {
+      setNotification({
+        open: true,
+        message: "Geçerli bir URL girilmedi",
+        severity: "error",
+      });
+      return;
+    }
+
+    try {
+      setLoading(true);
+      
+      if (!electronAPI || !electronAPI.loadM3uFromUrl) {
+        throw new Error("loadM3uFromUrl API bulunamadı");
+      }
+
+      const result = await electronAPI.loadM3uFromUrl(url);
+      
+      if (!result || !result.content) {
+        throw new Error("URL'den içerik yüklenemedi");
+      }
+
+      // M3U dosyasını ayrıştır
+      const parsedStreams = M3uParser.parse(result.content);
+      // Her stream için selected özelliğini ekle
+      const streamsWithSelection = parsedStreams.map((stream) => ({
+        ...stream,
+        selected: false,
+      }));
+
+      // Streams durumunu güncelle
+      setStreams(streamsWithSelection);
+
+      // URL'yi kaydet
+      setM3uUrl(url);
+      
+      // Dosya yolunu temizle (aynı anda sadece birisi aktif olmalı)
+      setM3uFilePath("");
+      
+      // Bildirimi göster
+      setNotification({
+        open: true,
+        message: `URL'den ${parsedStreams.length} adet stream yüklendi.`,
+        severity: "success",
+      });
+
+      // Eğer indirme klasörü seçildiyse, var olan dosyaları kontrol et
+      if (downloadDir) {
+        setTimeout(() => checkExistingFiles(downloadDir), 0);
+      }
+    } catch (error) {
+      console.error("URL'den M3U dosyası yüklenemedi:", error);
+      setNotification({
+        open: true,
+        message: "URL'den M3U dosyası yüklenemedi: " + error.message,
+        severity: "error",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // URL diyalog penceresini açma fonksiyonu
+  const openUrlDialog = () => {
+    // Mevcut URL'yi dialog içinde göster
+    setTempUrl(m3uUrl || "");
+    setUrlDialogOpen(true);
+  };
+
+  // URL diyalog penceresini kapatma fonksiyonu
+  const closeUrlDialog = () => {
+    setUrlDialogOpen(false);
+  };
+
+  // URL'yi kaydetme ve yükleme fonksiyonu
+  const saveAndLoadUrl = async () => {
+    // Boş URL kontrolü
+    if (!tempUrl || typeof tempUrl !== 'string' || tempUrl.trim() === '') {
+      setNotification({
+        open: true,
+        message: "Geçerli bir URL girilmedi",
+        severity: "error",
+      });
+      setUrlDialogOpen(false);
+      return;
+    }
+    
+    setUrlDialogOpen(false);
+    
+    // URL'yi kaydet
+    if (electronAPI && electronAPI.saveM3uUrl) {
+      await electronAPI.saveM3uUrl(tempUrl, autoUpdate);
+    }
+    
+    // M3U dosya yolunu temizle
+    setM3uFilePath("");
+    
+    // URL'den içeriği yükle
+    await loadM3uFromUrl(tempUrl);
+  };
+
+  // M3U bilgilerini sıfırlamak için fonksiyon
+  const resetM3uData = async () => {
+    try {
+      if (!electronAPI || !electronAPI.resetM3uData) {
+        throw new Error("resetM3uData API bulunamadı");
+      }
+
+      setLoading(true);
+      
+      // Backend'de M3U bilgilerini sıfırla
+      await electronAPI.resetM3uData();
+      
+      // Frontend durumunu temizle
+      setM3uFilePath("");
+      setM3uUrl("");
+      setStreams([]);
+      
+      setNotification({
+        open: true,
+        message: "M3U dosyası ve URL bilgileri başarıyla sıfırlandı.",
+        severity: "success",
+      });
+    } catch (error) {
+      console.error("M3U bilgilerini sıfırlama hatası:", error);
+      setNotification({
+        open: true,
+        message: "M3U bilgileri sıfırlanamadı: " + error.message,
+        severity: "error",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
-    <Container maxWidth="lg">
+    <Container maxWidth="xl">
       <Box sx={{ my: 4 }}>
         <Typography variant="h4" component="h1" gutterBottom>
           M3U Downloader
@@ -1210,12 +1391,49 @@ function App() {
 
           <Button
             variant="contained"
+            startIcon={<LinkIcon />}
+            onClick={openUrlDialog}
+            disabled={loading || downloading || batchDownloading}
+            sx={{ ml: 2 }}
+          >
+            M3U URL Ekle
+          </Button>
+
+          {m3uUrl && (
+            <Button
+              variant="contained"
+              color="secondary"
+              startIcon={<RefreshIcon />}
+              onClick={() => loadM3uFromUrl(m3uUrl)}
+              disabled={loading || downloading || batchDownloading || !m3uUrl}
+              sx={{ ml: 2 }}
+            >
+              URL'den Güncelle
+            </Button>
+          )}
+
+          <Button
+            variant="contained"
             startIcon={<FolderOpenIcon />}
             onClick={selectDownloadFolder}
             disabled={loading || downloading || batchDownloading}
+            sx={{ ml: 2 }}
           >
             İndirme Klasörü Seç
           </Button>
+
+          {(m3uFilePath || m3uUrl) && (
+            <Button
+              variant="contained"
+              color="error"
+              startIcon={<DeleteIcon />}
+              onClick={resetM3uData}
+              disabled={loading || downloading || batchDownloading}
+              sx={{ ml: 2 }}
+            >
+              M3U Bilgilerini Sıfırla
+            </Button>
+          )}
 
           {streams.length > 0 && (
             <Button
@@ -1765,6 +1983,38 @@ function App() {
           </Alert>
         </Snackbar>
       </Box>
+
+      {/* URL girişi için diyalog penceresi */}
+      <Dialog open={urlDialogOpen} onClose={closeUrlDialog}>
+        <DialogTitle>M3U URL Ekle</DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            margin="dense"
+            label="M3U Dosya URL'si"
+            type="url"
+            fullWidth
+            variant="outlined"
+            value={tempUrl}
+            onChange={(e) => setTempUrl(e.target.value)}
+            placeholder="https://ornek.com/iptv.m3u"
+          />
+          <Box sx={{ mt: 2, display: 'flex', alignItems: 'center' }}>
+            <Checkbox
+              checked={autoUpdate}
+              onChange={(e) => setAutoUpdate(e.target.checked)}
+              name="autoUpdate"
+            />
+            <Typography>Uygulama başlangıcında otomatik güncelle</Typography>
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeUrlDialog}>İptal</Button>
+          <Button onClick={saveAndLoadUrl} variant="contained" color="primary">
+            Kaydet ve Yükle
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Container>
   );
 }
