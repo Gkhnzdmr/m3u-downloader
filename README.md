@@ -26,6 +26,7 @@ npm start
 Uygulamayı yürütülebilir bir dosya olarak derlemek için:
 
 ```bash
+npm i -g electron-builder
 npm run build
 ```
 
